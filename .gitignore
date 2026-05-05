@@ -1,0 +1,104 @@
+# ============================================================
+# TerraLink — Kotlin Multiplatform + Compose Multiplatform
+# Targets: Android, iOS, Desktop (JVM)
+# ============================================================
+
+# --- IDE: IntelliJ / Android Studio / Fleet (no commit) ------
+.idea/
+*.iml
+*.iws
+*.ipr
+.idea_modules/
+.fleet/
+.vscode/
+
+# --- Gradle / Kotlin -----------------------------------------
+.gradle/
+.kotlin/
+build/
+**/build/
+!src/**/build/
+out/
+bin/
+gradle-app.setting
+!gradle-wrapper.jar
+.gradletasknamecache
+local.properties
+
+# --- Kotlin/Native & JS --------------------------------------
+.konan/
+kotlin-js-store/
+
+# --- Android -------------------------------------------------
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+captures/
+.navigation/
+.externalNativeBuild/
+.cxx/
+release/
+# Signing material — NEVER commit
+*.keystore
+*.jks
+keystore.properties
+signing.properties
+
+# --- iOS / Xcode ---------------------------------------------
+xcuserdata/
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+!*.xcodeproj/project.xcworkspace/
+!*.xcworkspace/contents.xcworkspacedata
+**/xcshareddata/WorkspaceSettings.xcsettings
+DerivedData/
+*.xcscmblueprint
+*.xccheckout
+.xcode.env.local
+# Swift Package Manager (per-user resolved state)
+.swiftpm/
+# CocoaPods (commit Podfile.lock; ignore the rest)
+Pods/
+# Carthage build outputs
+Carthage/Build/
+# fastlane local outputs
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/
+fastlane/test_output/
+
+# --- Compose Hot Reload --------------------------------------
+.compose/
+
+# --- JVM crash logs ------------------------------------------
+hs_err_pid*
+replay_pid*
+
+# --- Logs / coverage / test output ---------------------------
+*.log
+coverage/
+*.lcov
+
+# --- Secrets / env -------------------------------------------
+.env
+.env.*
+!.env.example
+secrets/
+
+# --- Node (if any tooling pulls it in) -----------------------
+node_modules/
+
+# --- OS junk -------------------------------------------------
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+Icon?
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+desktop.ini
