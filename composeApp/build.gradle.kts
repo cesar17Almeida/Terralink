@@ -11,6 +11,12 @@ plugins {
 }
 
 kotlin {
+    // `expect class` (used for the BLE platform layer) is still marked Beta
+    // in Kotlin 2.x; this silences the warning at every target.
+    compilerOptions {
+        freeCompilerArgs.add("-Xexpect-actual-classes")
+    }
+
     androidTarget {
         compilerOptions {
             jvmTarget.set(JvmTarget.JVM_11)
