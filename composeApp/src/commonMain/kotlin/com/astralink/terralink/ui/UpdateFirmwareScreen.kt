@@ -17,6 +17,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -36,6 +37,9 @@ import com.astralink.terralink.ble.session.BlobProgress
 import com.astralink.terralink.model.SavedStation
 import kotlinx.coroutines.flow.catch
 
+// Captures "0.1.0", "0.1.0-rc1", "1.2", optionally prefixed with "v".
+private val VERSION_REGEX = Regex("""v?(\d+\.\d+(?:\.\d+)?(?:-[\w.]+)?)""")
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UpdateFirmwareScreen(
@@ -43,21 +47,35 @@ fun UpdateFirmwareScreen(
     active: ActiveSession,
     onBack: () -> Unit,
 ) {
-    var firmwareBytes by remember { mutableStateOf<ByteArray?>(null) }
-    var firmwareName by remember { mutableStateOf<String?>(null) }
-    var firmwareVersion by remember { mutableStateOf<String?>(null) }
+    var firmware by remember { mutableStateOf<PickedFile?>(null) }
+    var version by remember { mutableStateOf("") }
     var progress by remember { mutableStateOf<BlobProgress?>(null) }
-    var triggerUpload by remember { mutableStateOf(false) }
+    var uploading by remember { mutableStateOf(false) }
 
-    LaunchedEffect(triggerUpload) {
-        if (!triggerUpload) return@LaunchedEffect
-        val bytes = firmwareBytes ?: return@LaunchedEffect
-        val version = firmwareVersion ?: return@LaunchedEffect
+    val launchPicker = rememberFirmwareFilePicker { picked ->
+        firmware = picked
+        // Pre-fill version if the filename embeds one; user can still override.
+        version = VERSION_REGEX.find(picked.name)?.groupValues?.get(1) ?: ""
+    }
+
+    val terminal = progress is BlobProgress.Success || progress is BlobProgress.Failure
+    val canUpload = firmware != null && version.isNotBlank() && !uploading
+
+    LaunchedEffect(uploading) {
+        if (!uploading) return@LaunchedEffect
+        val bytes = firmware?.bytes ?: return@LaunchedEffect
         active.pushFirmware(bytes, version)
             .catch { e ->
                 progress = BlobProgress.Failure(e.message ?: e::class.simpleName ?: "upload failed")
             }
             .collect { p -> progress = p }
+    }
+
+    LaunchedEffect(progress) {
+        // Re-enable the button once we've reached a terminal state.
+        if (progress is BlobProgress.Success || progress is BlobProgress.Failure) {
+            uploading = false
+        }
     }
 
     Scaffold(
@@ -86,45 +104,44 @@ fun UpdateFirmwareScreen(
             Spacer(Modifier.height(8.dp))
 
             FileSelector(
-                fileName = firmwareName,
-                onSelect = {
-                    // TODO: implement platform file picker (expect/actual).
-                    // Placeholder so the rest of the flow renders:
-                    firmwareName = "savia-arm64 (placeholder)"
-                    firmwareVersion = "0.1.0"
-                    firmwareBytes = ByteArray(0)
-                },
+                file = firmware,
+                onSelect = launchPicker,
                 onClear = {
-                    firmwareBytes = null
-                    firmwareName = null
-                    firmwareVersion = null
+                    firmware = null
+                    version = ""
+                    progress = null
                 },
             )
 
+            if (firmware != null) {
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = version,
+                    onValueChange = { version = it },
+                    label = { Text("Versión") },
+                    placeholder = { Text("ej. 0.2.0") },
+                    singleLine = true,
+                    enabled = !uploading,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+
             Spacer(Modifier.height(20.dp))
 
-            val canUpload = firmwareBytes != null && firmwareBytes!!.isNotEmpty() && !triggerUpload
             Button(
-                onClick = { triggerUpload = true },
+                onClick = {
+                    progress = null
+                    uploading = true
+                },
                 enabled = canUpload,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(if (triggerUpload) "Subiendo..." else "Subir e instalar")
+                Text(if (uploading) "Subiendo..." else "Subir e instalar")
             }
 
             progress?.let {
                 Spacer(Modifier.height(20.dp))
                 UploadProgress(progress = it)
-            }
-
-            if (firmwareBytes != null && firmwareBytes!!.isEmpty()) {
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    text = "El selector de archivo aún no está implementado; " +
-                            "este botón requerirá un .bin real para activarse.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
         }
     }
@@ -160,7 +177,7 @@ private fun TargetStationCard(station: SavedStation) {
 
 @Composable
 private fun FileSelector(
-    fileName: String?,
+    file: PickedFile?,
     onSelect: () -> Unit,
     onClear: () -> Unit,
 ) {
@@ -173,7 +190,7 @@ private fun FileSelector(
         ),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            if (fileName == null) {
+            if (file == null) {
                 Text(
                     text = "Ningún archivo seleccionado",
                     style = MaterialTheme.typography.bodyMedium,
@@ -191,9 +208,15 @@ private fun FileSelector(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = fileName,
+                            text = file.name,
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.Medium,
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = formatBytes(file.bytes.size),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     TextButton(onClick = onClear) { Text("Cambiar") }
@@ -233,4 +256,11 @@ private fun UploadProgress(progress: BlobProgress) {
             modifier = Modifier.fillMaxWidth().height(6.dp),
         )
     }
+}
+
+private fun formatBytes(n: Int): String {
+    if (n < 1024) return "$n B"
+    if (n < 1024 * 1024) return "${n / 1024} KB"
+    val mb = n / 1024.0 / 1024.0
+    return "${(mb * 10).toInt() / 10.0} MB"
 }
