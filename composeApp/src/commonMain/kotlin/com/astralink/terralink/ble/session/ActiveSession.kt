@@ -1,9 +1,11 @@
 package com.astralink.terralink.ble.session
 
 import com.astralink.terralink.ble.SaviaConnection
+import com.astralink.terralink.ble.codec.SaviaCbor
 import com.astralink.terralink.ble.codec.chunkedDecode
 import com.astralink.terralink.ble.codec.decode
 import com.astralink.terralink.ble.codec.encode
+import com.astralink.terralink.ble.protocol.Aggregation
 import com.astralink.terralink.ble.protocol.BlobControlEnvelope
 import com.astralink.terralink.ble.protocol.BlobKind
 import com.astralink.terralink.ble.protocol.BlobStartMsg
@@ -14,8 +16,11 @@ import com.astralink.terralink.ble.protocol.CHR_STATUS_UUID
 import com.astralink.terralink.ble.protocol.CHR_TIME_SYNC_UUID
 import com.astralink.terralink.ble.protocol.CHR_WEATHER_UUID
 import com.astralink.terralink.ble.protocol.DataChunkMsg
+import com.astralink.terralink.ble.protocol.DataKind
 import com.astralink.terralink.ble.protocol.DataRequestMsg
 import com.astralink.terralink.ble.protocol.Op
+import com.astralink.terralink.ble.protocol.Prediction
+import com.astralink.terralink.ble.protocol.Reading
 import com.astralink.terralink.ble.protocol.StatusMsg
 import com.astralink.terralink.ble.protocol.TimeSyncMsg
 import com.astralink.terralink.ble.protocol.WeatherData
@@ -28,6 +33,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.takeWhile
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.decodeFromByteArray
 
 private const val L2CAP_CHUNK_BYTES = 4096
 
@@ -64,9 +71,35 @@ class ActiveSession internal constructor(
     // --- Data query --------------------------------------------------------
 
     /**
-     * Issue a data_request and collect data_response chunks until eof.
-     * Returns the reassembled raw payload (CBOR bytes); callers decode
-     * it into the concrete shape (list of readings, aggregations, ...).
+     * Ask the Pi for raw sensor readings inside [fromMs, toMs).
+     * Both bounds are optional; with neither, returns everything in the
+     * retention window (capped by `limit` if set).
+     */
+    suspend fun requestRawReadings(
+        fromMs: Long? = null,
+        toMs: Long? = null,
+        limit: Int? = null,
+    ): List<Reading> = decodePayload(requestData(DataKind.RAW, fromMs, toMs, limit))
+
+    /** Hourly aggregations derived on the Pi from the readings table. */
+    suspend fun requestHourlyAggregations(
+        fromMs: Long? = null,
+        toMs: Long? = null,
+        limit: Int? = null,
+    ): List<Aggregation> = decodePayload(requestData(DataKind.AGG, fromMs, toMs, limit))
+
+    /** Model outputs. Returns [] until the ML pipeline lands on the Pi. */
+    suspend fun requestPredictions(
+        fromMs: Long? = null,
+        toMs: Long? = null,
+        limit: Int? = null,
+    ): List<Prediction> = decodePayload(requestData(DataKind.PRED, fromMs, toMs, limit))
+
+    /**
+     * Lower-level helper used by the typed `request*` methods. Issues a
+     * data_request and collects data_response chunks until eof, returning
+     * the reassembled CBOR bytes. Public so callers can do their own
+     * decoding for kinds we haven't typed yet.
      */
     suspend fun requestData(
         kind: String,
@@ -94,6 +127,10 @@ class ActiveSession internal constructor(
         collector.await()
         chunkedDecode(collected)
     }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    private inline fun <reified T> decodePayload(bytes: ByteArray): List<T> =
+        SaviaCbor.decodeFromByteArray<List<T>>(bytes)
 
     // --- Blob push (firmware / model) --------------------------------------
 
