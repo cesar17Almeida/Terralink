@@ -22,6 +22,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -30,28 +31,40 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.astralink.terralink.model.Device
+import com.astralink.terralink.ble.session.ActiveSession
+import com.astralink.terralink.ble.session.BlobProgress
+import com.astralink.terralink.model.SavedStation
+import kotlinx.coroutines.flow.catch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UpdateFirmwareScreen(
-    device: Device,
+    station: SavedStation,
+    active: ActiveSession,
     onBack: () -> Unit,
 ) {
-    // Estado puramente UI para el mockup — no sube nada.
-    var selectedFile by remember { mutableStateOf<String?>(null) }
-    var uploading by remember { mutableStateOf(false) }
-    val mockProgress = 0.42f
+    var firmwareBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var firmwareName by remember { mutableStateOf<String?>(null) }
+    var firmwareVersion by remember { mutableStateOf<String?>(null) }
+    var progress by remember { mutableStateOf<BlobProgress?>(null) }
+    var triggerUpload by remember { mutableStateOf(false) }
+
+    LaunchedEffect(triggerUpload) {
+        if (!triggerUpload) return@LaunchedEffect
+        val bytes = firmwareBytes ?: return@LaunchedEffect
+        val version = firmwareVersion ?: return@LaunchedEffect
+        active.pushFirmware(bytes, version)
+            .catch { e ->
+                progress = BlobProgress.Failure(e.message ?: e::class.simpleName ?: "upload failed")
+            }
+            .collect { p -> progress = p }
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = {
-                    Text("Actualizar firmware", fontWeight = FontWeight.SemiBold)
-                },
-                navigationIcon = {
-                    TextButton(onClick = onBack) { Text("Atrás") }
-                },
+                title = { Text("Actualizar firmware", fontWeight = FontWeight.SemiBold) },
+                navigationIcon = { TextButton(onClick = onBack) { Text("Atrás") } },
             )
         },
     ) { innerPadding ->
@@ -61,7 +74,7 @@ fun UpdateFirmwareScreen(
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
-            CurrentVersionCard(device = device)
+            TargetStationCard(station = station)
 
             Spacer(Modifier.height(20.dp))
 
@@ -73,50 +86,71 @@ fun UpdateFirmwareScreen(
             Spacer(Modifier.height(8.dp))
 
             FileSelector(
-                fileName = selectedFile,
-                onSelect = { selectedFile = "savia-v0.2.0-aarch64.bin" },
-                onClear = { selectedFile = null },
+                fileName = firmwareName,
+                onSelect = {
+                    // TODO: implement platform file picker (expect/actual).
+                    // Placeholder so the rest of the flow renders:
+                    firmwareName = "savia-arm64 (placeholder)"
+                    firmwareVersion = "0.1.0"
+                    firmwareBytes = ByteArray(0)
+                },
+                onClear = {
+                    firmwareBytes = null
+                    firmwareName = null
+                    firmwareVersion = null
+                },
             )
 
             Spacer(Modifier.height(20.dp))
 
+            val canUpload = firmwareBytes != null && firmwareBytes!!.isNotEmpty() && !triggerUpload
             Button(
-                onClick = { uploading = true },
-                enabled = selectedFile != null && !uploading,
+                onClick = { triggerUpload = true },
+                enabled = canUpload,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(if (uploading) "Subiendo..." else "Subir e instalar")
+                Text(if (triggerUpload) "Subiendo..." else "Subir e instalar")
             }
 
-            if (uploading) {
+            progress?.let {
                 Spacer(Modifier.height(20.dp))
-                UploadProgress(progress = mockProgress)
+                UploadProgress(progress = it)
+            }
+
+            if (firmwareBytes != null && firmwareBytes!!.isEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "El selector de archivo aún no está implementado; " +
+                            "este botón requerirá un .bin real para activarse.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
 }
 
 @Composable
-private fun CurrentVersionCard(device: Device) {
+private fun TargetStationCard(station: SavedStation) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                text = "Versión actual",
+                text = "Estación destino",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                text = device.firmwareVersion,
+                text = station.displayName,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
             )
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(2.dp))
             Text(
-                text = "${device.name} · ${device.model}",
+                text = station.bleId,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -161,11 +195,6 @@ private fun FileSelector(
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.Medium,
                         )
-                        Text(
-                            text = "16,2 MB · firmado Ed25519",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
                     }
                     TextButton(onClick = onClear) { Text("Cambiar") }
                 }
@@ -175,31 +204,33 @@ private fun FileSelector(
 }
 
 @Composable
-private fun UploadProgress(progress: Float) {
+private fun UploadProgress(progress: BlobProgress) {
+    val (label, fraction) = when (progress) {
+        BlobProgress.Starting -> "Iniciando..." to 0f
+        BlobProgress.WaitingForPsm -> "Esperando canal L2CAP..." to 0f
+        is BlobProgress.Transferring -> "Subiendo vía L2CAP..." to progress.fraction
+        BlobProgress.Verifying -> "Verificando firma y aplicando..." to 1f
+        BlobProgress.Success -> "Instalación completada" to 1f
+        is BlobProgress.Failure -> "Error: ${progress.reason}" to 0f
+    }
+
     Column {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Text(
-                text = "Subiendo vía BLE...",
-                style = MaterialTheme.typography.labelMedium,
-            )
-            Text(
-                text = "${(progress * 100).toInt()} %",
-                style = MaterialTheme.typography.labelMedium,
-            )
+            Text(text = label, style = MaterialTheme.typography.labelMedium)
+            if (progress is BlobProgress.Transferring) {
+                Text(
+                    text = "${(progress.fraction * 100).toInt()} %",
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
         }
         Spacer(Modifier.height(6.dp))
         LinearProgressIndicator(
-            progress = { progress },
+            progress = { fraction },
             modifier = Modifier.fillMaxWidth().height(6.dp),
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = "Verificando firma del binario...",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }

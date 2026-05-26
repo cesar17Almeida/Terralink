@@ -7,29 +7,85 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.tooling.preview.Preview
-import com.astralink.terralink.model.mockDevice
-import com.astralink.terralink.ui.HomeScreen
+import com.astralink.terralink.ble.session.ActiveSession
+import com.astralink.terralink.ble.session.SaviaSession
+import com.astralink.terralink.model.SavedStation
+import com.astralink.terralink.state.StationsRepository
+import com.astralink.terralink.ui.DeviceScreen
+import com.astralink.terralink.ui.ScanScreen
+import com.astralink.terralink.ui.StationsListScreen
 import com.astralink.terralink.ui.UpdateFirmwareScreen
+import com.astralink.terralink.util.nowMs
 
 private sealed interface Screen {
-    data object Home : Screen
-    data object UpdateFirmware : Screen
+    data object StationsList : Screen
+    data object Scan : Screen
+    data class Device(val station: SavedStation) : Screen
+    data class UpdateFirmware(val station: SavedStation) : Screen
 }
 
 @Composable
 @Preview
 fun App() {
     MaterialTheme {
-        var screen by remember { mutableStateOf<Screen>(Screen.Home) }
-        when (screen) {
-            Screen.Home -> HomeScreen(
-                device = mockDevice,
-                onUpdateFirmware = { screen = Screen.UpdateFirmware },
+        val session = remember { SaviaSession() }
+        var screen by remember { mutableStateOf<Screen>(Screen.StationsList) }
+        // Shared between Device and UpdateFirmware so the L2CAP transfer
+        // reuses the same connection rather than reconnecting on navigation.
+        var activeSession by remember { mutableStateOf<ActiveSession?>(null) }
+
+        when (val current = screen) {
+            Screen.StationsList -> StationsListScreen(
+                session = session,
+                onAddStation = { screen = Screen.Scan },
+                onOpenStation = { station ->
+                    activeSession = null
+                    screen = Screen.Device(station)
+                },
             )
-            Screen.UpdateFirmware -> UpdateFirmwareScreen(
-                device = mockDevice,
-                onBack = { screen = Screen.Home },
+
+            Screen.Scan -> ScanScreen(
+                session = session,
+                onBack = { screen = Screen.StationsList },
+                onPair = { device ->
+                    val station = SavedStation(
+                        bleId = device.id,
+                        displayName = device.name ?: "Estación ${device.id.takeLast(5)}",
+                        pairedAtMs = nowMs(),
+                    )
+                    StationsRepository.add(station)
+                    activeSession = null
+                    screen = Screen.Device(station)
+                },
             )
+
+            is Screen.Device -> DeviceScreen(
+                station = current.station,
+                session = session,
+                onUpdateFirmware = { active ->
+                    activeSession = active
+                    screen = Screen.UpdateFirmware(current.station)
+                },
+                onBack = {
+                    activeSession = null
+                    screen = Screen.StationsList
+                },
+            )
+
+            is Screen.UpdateFirmware -> {
+                val active = activeSession
+                if (active == null) {
+                    // No live session somehow (e.g. process restored). Bounce
+                    // back to Device, which will reconnect.
+                    screen = Screen.Device(current.station)
+                } else {
+                    UpdateFirmwareScreen(
+                        station = current.station,
+                        active = active,
+                        onBack = { screen = Screen.Device(current.station) },
+                    )
+                }
+            }
         }
     }
 }

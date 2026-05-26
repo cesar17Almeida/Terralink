@@ -141,6 +141,19 @@ data class BlobErrMsg(
     val msg: String,
 )
 
+/**
+ * Generic envelope for inbound blob_control notifications. Used by the
+ * session layer to dispatch on `op` without knowing the concrete subtype
+ * ahead of time. Fields are optional because each op only sets a subset.
+ */
+@Serializable
+data class BlobControlEnvelope(
+    val v: Int,
+    val op: String,
+    val psm: Int? = null,
+    val msg: String? = null,
+)
+
 // --- status (read or notify on CHR_STATUS_UUID) ------------------------------
 
 @Serializable

@@ -65,8 +65,8 @@ actual class SaviaConnection internal constructor(
     }
 
     actual suspend fun disconnect() {
-        IosBleManager.central.cancelPeripheralConnection(peripheral)
-        IosBleManager.forget(peripheral.identifier.UUIDString)
+        IosBle.central.cancelPeripheralConnection(peripheral)
+        IosBle.forget(peripheral.identifier.UUIDString)
     }
 
     private fun findCharacteristic(uuid: String): CBCharacteristic {

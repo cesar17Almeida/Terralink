@@ -28,7 +28,12 @@ import kotlin.coroutines.resumeWithException
 
 /**
  * App-wide singleton that owns a single CBCentralManager and dispatches
- * delegate callbacks to per-peripheral state. Created lazily on first use.
+ * delegate callbacks to per-peripheral state. Access via IosBleManager.shared.
+ *
+ * Declared as `class` (not `object`) on purpose: Kotlin/Native's iosArm64
+ * backend cannot lower a top-level `object` that subclasses an Obj-C class
+ * (NSObject) and crashes during code generation. Wrapping the singleton in
+ * a lazy companion property sidesteps that path entirely.
  *
  * Threading: CoreBluetooth callbacks run on the queue we hand to the manager
  * (null = main). We resume coroutines directly from those callbacks; the
@@ -36,7 +41,7 @@ import kotlin.coroutines.resumeWithException
  * caller was on.
  */
 @OptIn(ExperimentalForeignApi::class)
-internal object IosBleManager : NSObject(), CBCentralManagerDelegateProtocol {
+internal class IosBleManager : NSObject(), CBCentralManagerDelegateProtocol {
 
     val central: CBCentralManager by lazy {
         CBCentralManager(delegate = this, queue = null)
@@ -91,11 +96,16 @@ internal object IosBleManager : NSObject(), CBCentralManagerDelegateProtocol {
         advertisementData: Map<Any?, *>,
         RSSI: NSNumber,
     ) {
+        // CBAdvertisementDataServiceUUIDsKey -> [CBUUID]. Check if Savia is in there.
+        val saviaUuid = CBUUID.UUIDWithString(SAVIA_SERVICE_UUID)
+        val advertised = advertisementData["kCBAdvDataServiceUUIDs"] as? List<*>
+        val isSavia = advertised?.any { (it as? CBUUID) == saviaUuid } == true
         scanFlow.tryEmit(
             ScannedDevice(
                 id = didDiscoverPeripheral.identifier.UUIDString,
                 name = didDiscoverPeripheral.name,
                 rssi = RSSI.intValue,
+                isSavia = isSavia,
             )
         )
     }
@@ -138,6 +148,12 @@ internal object IosBleManager : NSObject(), CBCentralManagerDelegateProtocol {
  * SaviaConnection.
  */
 @OptIn(ExperimentalForeignApi::class)
+// Singleton lives at top-level rather than in a companion object: Kotlin/
+// Native's iosArm64 backend rejects fields in a companion when the enclosing
+// class extends an Obj-C type. By-lazy here gives us the same semantics.
+internal val IosBle: IosBleManager by lazy { IosBleManager() }
+
+
 internal class IosPeripheralDelegate : NSObject(), CBPeripheralDelegateProtocol {
 
     var pendingDiscoverServices: CancellableContinuation<Unit>? = null

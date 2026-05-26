@@ -4,7 +4,5 @@
 <dict>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
-	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>TerraLink uses Bluetooth to connect to your Savia station for configuration and data sync.</string>
 </dict>
 </plist>

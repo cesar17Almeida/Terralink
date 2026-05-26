@@ -14,51 +14,53 @@ import platform.Foundation.NSUUID
 @OptIn(ExperimentalForeignApi::class)
 actual class BleClient {
 
-    actual fun scan(): Flow<ScannedDevice> = callbackFlow {
+    actual fun scan(saviaOnly: Boolean): Flow<ScannedDevice> = callbackFlow {
         try {
-            IosBleManager.ensureReady()
+            IosBle.ensureReady()
         } catch (e: BleError) {
             close(e); return@callbackFlow
         }
 
         // Subscribe to scan results that the shared manager pushes.
         val job = launch {
-            IosBleManager.scanFlow.collect { trySend(it) }
+            IosBle.scanFlow.collect { trySend(it) }
         }
 
-        IosBleManager.central.scanForPeripheralsWithServices(
-            serviceUUIDs = listOf(CBUUID.UUIDWithString(SAVIA_SERVICE_UUID)),
-            options = null,
-        )
+        // saviaOnly -> filter list with our service UUID. !saviaOnly -> nil
+        // service UUIDs argument so iOS reports every advertisement.
+        val serviceUUIDs: List<CBUUID>? = if (saviaOnly) {
+            listOf(CBUUID.UUIDWithString(SAVIA_SERVICE_UUID))
+        } else null
+        IosBle.central.scanForPeripheralsWithServices(serviceUUIDs, options = null)
         awaitClose {
-            IosBleManager.central.stopScan()
+            IosBle.central.stopScan()
             job.cancel()
         }
     }
 
     actual suspend fun connect(deviceId: String): SaviaConnection {
-        IosBleManager.ensureReady()
+        IosBle.ensureReady()
         // The CoreBluetooth binding declares NSUUID(uUIDString:) as non-null,
         // but an invalid string would crash inside Foundation. Callers should
         // pass IDs that came from a ScannedDevice / a previous connection.
         val nsuuid = NSUUID(uUIDString = deviceId)
 
         // CoreBluetooth lets us look up a peripheral by its identifier.
-        val peripherals = IosBleManager.central
+        val peripherals = IosBle.central
             .retrievePeripheralsWithIdentifiers(listOf(nsuuid))
         val peripheral = (peripherals as List<CBPeripheral>?)?.firstOrNull()
             ?: throw BleError.NotFound("peripheral $deviceId not in CoreBluetooth cache; scan first")
 
-        IosBleManager.retain(peripheral)
+        IosBle.retain(peripheral)
 
         // 1. Connect.
         suspendCancellableCoroutine<CBPeripheral> { cont ->
-            IosBleManager.registerPendingConnect(deviceId, cont)
+            IosBle.registerPendingConnect(deviceId, cont)
             cont.invokeOnCancellation {
-                IosBleManager.cancelPendingConnect(deviceId)
-                IosBleManager.central.cancelPeripheralConnection(peripheral)
+                IosBle.cancelPendingConnect(deviceId)
+                IosBle.central.cancelPeripheralConnection(peripheral)
             }
-            IosBleManager.central.connectPeripheral(peripheral, options = null)
+            IosBle.central.connectPeripheral(peripheral, options = null)
         }
 
         // 2. Discover services + characteristics.
