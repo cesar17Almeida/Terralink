@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.ble.session.BlobProgress
 import com.astralink.terralink.model.SavedStation
+import com.astralink.terralink.ui.components.BackIconButton
 import kotlinx.coroutines.flow.catch
 
 // Captures "0.1.0", "0.1.0-rc1", "1.2", optionally prefixed with "v".
@@ -82,7 +83,7 @@ fun UpdateFirmwareScreen(
         topBar = {
             TopAppBar(
                 title = { Text("Actualizar firmware", fontWeight = FontWeight.SemiBold) },
-                navigationIcon = { TextButton(onClick = onBack) { Text("Atrás") } },
+                navigationIcon = { BackIconButton(onClick = onBack) },
             )
         },
     ) { innerPadding ->

@@ -1,5 +1,11 @@
 package com.astralink.terralink.ui
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -38,6 +44,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -58,6 +67,7 @@ import com.astralink.terralink.ui.charts.ChartSeries
 import com.astralink.terralink.ui.charts.LineChart
 import com.astralink.terralink.ui.charts.MoistureDepthColors
 import com.astralink.terralink.ui.charts.TemperatureDepthColors
+import com.astralink.terralink.ui.components.BackIconButton
 import com.astralink.terralink.ui.components.TimeRangePicker
 import com.astralink.terralink.ui.components.TimeRangePreset
 import com.astralink.terralink.ui.components.resolveTimeRange
@@ -119,6 +129,24 @@ fun SyncScreen(
     var activeJob by remember { mutableStateOf<Job?>(null) }
     var showCancelDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val haptics = LocalHapticFeedback.current
+
+    // Subtle haptic ticks at phase transitions. We key on the page index so
+    // we don't fire on every chunk (would feel like a buzz). Done and Failed
+    // get their own one-shot patterns.
+    val currentPage = (phase as? SyncPhase.Downloading)?.page ?: 0
+    LaunchedEffect(currentPage) {
+        if (currentPage > 0) {
+            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        }
+    }
+    LaunchedEffect(phase::class) {
+        when (phase) {
+            is SyncPhase.Done -> haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+            is SyncPhase.Failed -> haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+            else -> Unit
+        }
+    }
 
     // Intercept back while a sync is running so the user can confirm before
     // losing in-flight progress.
@@ -155,7 +183,7 @@ fun SyncScreen(
         topBar = {
             TopAppBar(
                 title = { Text("Sincronizar datos", fontWeight = FontWeight.SemiBold) },
-                navigationIcon = { TextButton(onClick = safeBack) { Text("Atrás") } },
+                navigationIcon = { BackIconButton(onClick = safeBack) },
             )
         },
     ) { innerPadding ->
@@ -326,10 +354,26 @@ private fun StepDot(active: Boolean, done: Boolean, failed: Boolean, label: Stri
         active -> MaterialTheme.colorScheme.primary
         else -> MaterialTheme.colorScheme.outlineVariant
     }
+    // While the step is active we pulse the dot's alpha so the user has a
+    // gentle "we're working" signal even when the bottom progress bar isn't
+    // visibly moving yet (e.g. during Counting before the COUNT returns).
+    val infinite = rememberInfiniteTransition(label = "step-blink")
+    val alpha = if (active) {
+        infinite.animateFloat(
+            initialValue = 0.45f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 700, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "step-alpha",
+        ).value
+    } else 1f
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
             modifier = Modifier
                 .size(if (active) 18.dp else 14.dp)
+                .alpha(alpha)
                 .background(color, CircleShape),
         )
         Spacer(Modifier.height(4.dp))

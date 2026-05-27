@@ -29,10 +29,8 @@ import com.astralink.terralink.util.nowMs
  * station's last sync.
  */
 enum class TimeRangePreset(val label: String) {
-    Last24h("Últimas 24 h"),
-    Last7d("Últimos 7 días"),
-    Today("Hoy"),
-    SinceLastSync("Desde último sync"),
+    Last24h("24 h"),
+    Last7d("7 días"),
     Custom("Personalizado"),
 }
 
@@ -51,12 +49,6 @@ fun resolveTimeRange(
     return when (preset) {
         TimeRangePreset.Last24h -> TimeRange(now - 24 * MS_PER_HOUR, now)
         TimeRangePreset.Last7d  -> TimeRange(now - 7 * MS_PER_DAY, now)
-        TimeRangePreset.Today   -> {
-            // Start of today UTC -- coarse but no kotlinx-datetime dep yet.
-            val dayStart = (now / MS_PER_DAY) * MS_PER_DAY
-            TimeRange(dayStart, now)
-        }
-        TimeRangePreset.SinceLastSync -> TimeRange(lastSyncMs ?: (now - 24 * MS_PER_HOUR), now)
         TimeRangePreset.Custom -> TimeRange(
             fromMs = customFromMs ?: (now - 24 * MS_PER_HOUR),
             toMs = customToMs ?: now,

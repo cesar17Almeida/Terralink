@@ -38,6 +38,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.ScannedDevice
 import com.astralink.terralink.ble.session.SaviaSession
+import com.astralink.terralink.ui.components.BackIconButton
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
 
@@ -67,7 +68,7 @@ fun ScanScreen(
             TopAppBar(
                 title = { Text("Buscar estaciones", fontWeight = FontWeight.SemiBold) },
                 navigationIcon = {
-                    TextButton(onClick = onBack) { Text("Atrás") }
+                    BackIconButton(onClick = onBack)
                 },
             )
         },
