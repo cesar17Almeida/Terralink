@@ -44,6 +44,7 @@ import com.astralink.terralink.util.nowMs
 import kotlinx.coroutines.launch
 
 private const val DEFAULT_LOOKBACK_MS = 24L * 60 * 60 * 1000  // 24h
+private const val SYNC_LIMIT = 500                              // rows per request
 
 private sealed class ConnState {
     data object Connecting : ConnState()
@@ -54,7 +55,7 @@ private sealed class ConnState {
 private sealed class SyncState {
     data object Idle : SyncState()
     data object Running : SyncState()
-    data class Done(val count: Int, val atMs: Long) : SyncState()
+    data class Done(val count: Int, val atMs: Long, val more: Boolean) : SyncState()
     data class Failed(val message: String) : SyncState()
 }
 
@@ -215,9 +216,19 @@ private suspend fun runSync(
         val now = nowMs()
         active.setTime(now)
         val from = station.lastSyncMs ?: (now - DEFAULT_LOOKBACK_MS)
-        val readings = active.requestRawReadings(fromMs = from, toMs = now)
-        StationsRepository.updateLastSync(station.bleId, now)
-        onState(SyncState.Done(count = readings.size, atMs = now))
+        // Paginate so a single request never blows past the chunked-notify
+        // throughput budget. Each row is ~70 B CBOR; 500 rows fit in ~6 s
+        // of notify traffic, well under our 15 s timeout.
+        val readings = active.requestRawReadings(
+            fromMs = from, toMs = now, limit = SYNC_LIMIT,
+        )
+        // Advance the cursor to the timestamp of the last reading we got, so
+        // a follow-up sync picks up exactly where this one left off (avoids
+        // re-downloading the same window if the server had more than the limit).
+        val nextSyncFrom = readings.lastOrNull()?.tsMs?.plus(1) ?: now
+        StationsRepository.updateLastSync(station.bleId, nextSyncFrom)
+        val more = readings.size >= SYNC_LIMIT
+        onState(SyncState.Done(count = readings.size, atMs = now, more = more))
     } catch (e: BleError) {
         onState(SyncState.Failed(e.message ?: e::class.simpleName ?: "sync failed"))
     } catch (e: Throwable) {
@@ -235,7 +246,11 @@ private fun SyncStatusBanner(state: SyncState) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         is SyncState.Done -> Text(
-            text = "Listo: ${state.count} lecturas descargadas (${formatRelativeMs(state.atMs)}).",
+            text = if (state.more)
+                "Listo: ${state.count} lecturas descargadas. " +
+                "Hay más pendientes — pulsa de nuevo para continuar."
+            else
+                "Listo: ${state.count} lecturas descargadas (${formatRelativeMs(state.atMs)}).",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.primary,
         )
