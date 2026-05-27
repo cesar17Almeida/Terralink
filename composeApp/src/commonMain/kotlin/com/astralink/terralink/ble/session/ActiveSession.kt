@@ -33,10 +33,17 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.takeWhile
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.decodeFromByteArray
 
 private const val L2CAP_CHUNK_BYTES = 4096
+
+// Hard cap on how long we wait for the Pi to finish streaming chunks
+// for one data_request. Without this, if the request is rejected and
+// no chunks ever arrive, the collector flow waits forever and the UI
+// stays "Sincronizando..." indefinitely.
+private const val DATA_REQUEST_TIMEOUT_MS = 15_000L
 
 /**
  * Operations on an established GATT connection to Savia. Methods talk
@@ -106,26 +113,28 @@ class ActiveSession internal constructor(
         fromMs: Long? = null,
         toMs: Long? = null,
         limit: Int? = null,
-    ): ByteArray = coroutineScope {
-        val collected = mutableListOf<ByteArray>()
+    ): ByteArray = withTimeout(DATA_REQUEST_TIMEOUT_MS) {
+        coroutineScope {
+            val collected = mutableListOf<ByteArray>()
 
-        // Subscribe before writing the request so we don't miss the first chunk.
-        val collector = async {
-            dataResponseFlow
-                .takeWhile { raw ->
-                    collected.add(raw)
-                    val msg = decode<DataChunkMsg>(raw)
-                    !msg.eof
-                }
-                .collect {}
+            // Subscribe before writing the request so we don't miss the first chunk.
+            val collector = async {
+                dataResponseFlow
+                    .takeWhile { raw ->
+                        collected.add(raw)
+                        val msg = decode<DataChunkMsg>(raw)
+                        !msg.eof
+                    }
+                    .collect {}
+            }
+
+            connection.write(
+                CHR_DATA_REQUEST_UUID,
+                encode(DataRequestMsg(kind = kind, from = fromMs, to = toMs, limit = limit)),
+            )
+            collector.await()
+            chunkedDecode(collected)
         }
-
-        connection.write(
-            CHR_DATA_REQUEST_UUID,
-            encode(DataRequestMsg(kind = kind, from = fromMs, to = toMs, limit = limit)),
-        )
-        collector.await()
-        chunkedDecode(collected)
     }
 
     @OptIn(ExperimentalSerializationApi::class)
