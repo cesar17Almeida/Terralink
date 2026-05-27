@@ -6,8 +6,13 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		B80BBE6F2FC7786300FB9F98 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = B80BBE6E2FC7786300FB9F98 /* libsqlite3.tbd */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		212261B405ABC113634A7DD3 /* Terralink.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Terralink.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B80BBE6E2FC7786300FB9F98 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -41,12 +46,21 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B80BBE6F2FC7786300FB9F98 /* libsqlite3.tbd in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		B80BBE6D2FC7786200FB9F98 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				B80BBE6E2FC7786300FB9F98 /* libsqlite3.tbd */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		F867E0593DC4E7B620568635 /* Products */ = {
 			isa = PBXGroup;
 			children = (
@@ -60,6 +74,7 @@
 			children = (
 				F6A3060632417196F2F2CD20 /* Configuration */,
 				D33F2C360B963C206F2F19AF /* iosApp */,
+				B80BBE6D2FC7786200FB9F98 /* Frameworks */,
 				F867E0593DC4E7B620568635 /* Products */,
 			);
 			sourceTree = "<group>";

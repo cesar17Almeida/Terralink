@@ -37,6 +37,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.takeWhile
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -49,6 +50,15 @@ private const val L2CAP_CHUNK_BYTES = 4096
 // no chunks ever arrive, the collector flow waits forever and the UI
 // stays "Sincronizando..." indefinitely.
 private const val DATA_REQUEST_TIMEOUT_MS = 15_000L
+
+// How long we wait for the Pi to respond to a blob_control start with
+// the PSM (or an error). 15 s is generous -- the Pi only needs to bind
+// a free L2CAP PSM and emit one notify, no SQL or large queries.
+private const val BLOB_READY_TIMEOUT_MS = 15_000L
+// Same for the terminal OK/ERR notify after the L2CAP transfer ends.
+// 60 s leaves room for sha256 verification + the firmware-install
+// pathway on the Pi (provision_slot + flip + restart spawn).
+private const val BLOB_FINAL_TIMEOUT_MS = 60_000L
 
 /**
  * Operations on an established GATT connection to Savia. Methods talk
@@ -251,7 +261,15 @@ class ActiveSession internal constructor(
             connection.write(CHR_BLOB_CONTROL_UUID, encode(startMsg))
             emit(BlobProgress.WaitingForPsm)
 
-            val ready = readyResult.await()
+            val ready = try {
+                withTimeout(BLOB_READY_TIMEOUT_MS) { readyResult.await() }
+            } catch (e: TimeoutCancellationException) {
+                emit(BlobProgress.Failure(
+                    "El sensor no respondió con el canal L2CAP en ${BLOB_READY_TIMEOUT_MS / 1000} s. " +
+                        "Revisa que la conexión sigue activa.",
+                ))
+                return@coroutineScope
+            }
             if (ready.op == Op.BLOB_ERR) {
                 emit(BlobProgress.Failure(ready.msg ?: "server rejected blob"))
                 return@coroutineScope
@@ -285,7 +303,15 @@ class ActiveSession internal constructor(
             }
             emit(BlobProgress.Verifying)
 
-            val final = finalResult.await()
+            val final = try {
+                withTimeout(BLOB_FINAL_TIMEOUT_MS) { finalResult.await() }
+            } catch (e: TimeoutCancellationException) {
+                emit(BlobProgress.Failure(
+                    "El sensor no confirmó la instalación en " +
+                        "${BLOB_FINAL_TIMEOUT_MS / 1000} s.",
+                ))
+                return@coroutineScope
+            }
             if (final.op == Op.BLOB_OK) {
                 emit(BlobProgress.Success)
             } else {
