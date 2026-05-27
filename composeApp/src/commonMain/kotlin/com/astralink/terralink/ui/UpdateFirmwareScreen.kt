@@ -55,8 +55,11 @@ fun UpdateFirmwareScreen(
 
     val launchPicker = rememberFirmwareFilePicker { picked ->
         firmware = picked
-        // Pre-fill version if the filename embeds one; user can still override.
-        version = VERSION_REGEX.find(picked.name)?.groupValues?.get(1) ?: ""
+        // Version is parsed once from the filename and shown as read-only:
+        // the binary already embeds its own version, so letting the user
+        // override would just produce a slot whose folder name disagrees
+        // with `savia --version`.
+        version = VERSION_REGEX.find(picked.name)?.groupValues?.get(1).orEmpty()
     }
 
     val terminal = progress is BlobProgress.Success || progress is BlobProgress.Failure
@@ -116,15 +119,7 @@ fun UpdateFirmwareScreen(
 
             if (firmware != null) {
                 Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = version,
-                    onValueChange = { version = it },
-                    label = { Text("Versión") },
-                    placeholder = { Text("ej. 0.2.0") },
-                    singleLine = true,
-                    enabled = !uploading,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                VersionRow(version = version)
             }
 
             Spacer(Modifier.height(20.dp))
@@ -147,6 +142,34 @@ fun UpdateFirmwareScreen(
         }
     }
 }
+
+@Composable
+private fun VersionRow(version: String) {
+    // Read-only by design: the version travels embedded inside the binary
+    // (`savia --version`); letting the user override it from the UI would
+    // produce a slot whose folder name disagrees with what's actually
+    // installed.
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            text = "Versión detectada",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = if (version.isNotBlank()) version
+                   else "no detectada — renombra el archivo",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            color = if (version.isNotBlank()) MaterialTheme.colorScheme.onSurface
+                    else MaterialTheme.colorScheme.error,
+        )
+    }
+}
+
 
 @Composable
 private fun TargetStationCard(station: SavedStation) {
