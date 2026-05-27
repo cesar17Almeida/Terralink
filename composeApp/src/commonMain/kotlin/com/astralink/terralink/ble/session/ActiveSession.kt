@@ -15,7 +15,9 @@ import com.astralink.terralink.ble.protocol.CHR_DATA_RESPONSE_UUID
 import com.astralink.terralink.ble.protocol.CHR_STATUS_UUID
 import com.astralink.terralink.ble.protocol.CHR_TIME_SYNC_UUID
 import com.astralink.terralink.ble.protocol.CHR_WEATHER_UUID
+import com.astralink.terralink.ble.protocol.CountMsg
 import com.astralink.terralink.ble.protocol.DataChunkMsg
+import com.astralink.terralink.ble.protocol.DataCountRequestMsg
 import com.astralink.terralink.ble.protocol.DataKind
 import com.astralink.terralink.ble.protocol.DataRequestMsg
 import com.astralink.terralink.ble.protocol.Op
@@ -104,6 +106,36 @@ class ActiveSession internal constructor(
         toMs: Long? = null,
         limit: Int? = null,
     ): List<Prediction> = decodePayload(requestData(DataKind.PRED, fromMs, toMs, limit))
+
+    /**
+     * Cheap COUNT(*) over the same range. Lets SyncScreen draw a
+     * "Página N / M" bar before kicking off the paged downloads.
+     */
+    @OptIn(ExperimentalSerializationApi::class)
+    suspend fun requestRawCount(
+        fromMs: Long? = null,
+        toMs: Long? = null,
+    ): Long = withTimeout(DATA_REQUEST_TIMEOUT_MS) {
+        coroutineScope {
+            val collected = mutableListOf<ByteArray>()
+            val collector = async {
+                dataResponseFlow
+                    .takeWhile { raw ->
+                        collected.add(raw)
+                        val msg = decode<DataChunkMsg>(raw)
+                        !msg.eof
+                    }
+                    .collect {}
+            }
+            connection.write(
+                CHR_DATA_REQUEST_UUID,
+                encode(DataCountRequestMsg(kind = DataKind.RAW, from = fromMs, to = toMs)),
+            )
+            collector.await()
+            val payload = chunkedDecode(collected)
+            SaviaCbor.decodeFromByteArray<CountMsg>(payload).count
+        }
+    }
 
     /**
      * Streaming variant of requestRawReadings: emits DownloadProgress.Chunk

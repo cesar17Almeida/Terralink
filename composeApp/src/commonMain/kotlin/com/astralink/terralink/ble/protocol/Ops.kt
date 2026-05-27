@@ -12,6 +12,7 @@ object Op {
 
     // data_request write
     const val GET = "get"
+    const val COUNT = "count"
 
     // data_response notify chunks
     const val CHUNK = "chunk"

@@ -62,8 +62,10 @@ import com.astralink.terralink.ui.components.TimeRangePicker
 import com.astralink.terralink.ui.components.TimeRangePreset
 import com.astralink.terralink.ui.components.resolveTimeRange
 import com.astralink.terralink.util.nowMs
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import androidx.compose.material3.AlertDialog
 
 // Per-page hard cap to keep each notify stream under our per-page timeout.
 // We page automatically until the Pi returns less than this, so the user
@@ -78,8 +80,11 @@ private const val MAX_PAGES = 200
 private sealed class SyncPhase {
     data object Idle : SyncPhase()
     data object SyncingTime : SyncPhase()
+    data object Counting : SyncPhase()
     data class Downloading(
         val page: Int,
+        val pagesTotal: Int,           // 0 means "unknown" (count failed)
+        val expectedTotal: Long,       // 0 means "unknown"
         val totalSoFar: Int,
         val received: Int,
         val total: Int,
@@ -88,6 +93,11 @@ private sealed class SyncPhase {
     data class Done(val readings: List<Reading>) : SyncPhase()
     data class Failed(val message: String) : SyncPhase()
 }
+
+private fun SyncPhase.isActive(): Boolean = this is SyncPhase.SyncingTime ||
+    this is SyncPhase.Counting ||
+    this is SyncPhase.Downloading ||
+    this is SyncPhase.Persisting
 
 private enum class KindFilter(val label: String, val sensorKind: String) {
     Moisture("Humedad", "soil_moisture"),
@@ -106,13 +116,46 @@ fun SyncScreen(
     var customToMs by remember { mutableStateOf<Long?>(null) }
     var phase by remember { mutableStateOf<SyncPhase>(SyncPhase.Idle) }
     var kindFilter by remember { mutableStateOf(KindFilter.Moisture) }
+    var activeJob by remember { mutableStateOf<Job?>(null) }
+    var showCancelDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+
+    // Intercept back while a sync is running so the user can confirm before
+    // losing in-flight progress.
+    val safeBack: () -> Unit = {
+        if (phase.isActive()) showCancelDialog = true else onBack()
+    }
+
+    if (showCancelDialog) {
+        AlertDialog(
+            onDismissRequest = { showCancelDialog = false },
+            title = { Text("Cancelar sincronización") },
+            text = {
+                Text(
+                    "Hay una descarga en curso. Si sales ahora se cancelará y " +
+                        "perderás los datos que aún no se hayan guardado.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    activeJob?.cancel()
+                    showCancelDialog = false
+                    onBack()
+                }) { Text("Cancelar descarga") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCancelDialog = false }) {
+                    Text("Continuar descarga")
+                }
+            },
+        )
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Sincronizar datos", fontWeight = FontWeight.SemiBold) },
-                navigationIcon = { TextButton(onClick = onBack) { Text("Atrás") } },
+                navigationIcon = { TextButton(onClick = safeBack) { Text("Atrás") } },
             )
         },
     ) { innerPadding ->
@@ -151,7 +194,7 @@ fun SyncScreen(
                             customToMs = customToMs,
                             lastSyncMs = station.lastSyncMs,
                         )
-                        scope.launch {
+                        activeJob = scope.launch {
                             runStreamingSync(
                                 active = active,
                                 station = station,
@@ -243,6 +286,7 @@ private fun PhaseStepper(phase: SyncPhase) {
     val currentIdx = when (phase) {
         SyncPhase.Idle -> -1
         SyncPhase.SyncingTime -> 0
+        SyncPhase.Counting -> 1
         is SyncPhase.Downloading -> 1
         SyncPhase.Persisting -> 2
         is SyncPhase.Done -> 3
@@ -310,15 +354,28 @@ private fun PhaseStatusLine(phase: SyncPhase) {
             "Enviando hora del móvil al sensor...",
             style = MaterialTheme.typography.bodySmall,
         )
+        SyncPhase.Counting -> Text(
+            "Calculando total de lecturas...",
+            style = MaterialTheme.typography.bodySmall,
+        )
         is SyncPhase.Downloading -> Column {
+            val knownTotal = phase.expectedTotal > 0 && phase.pagesTotal > 0
             Text(
-                "Página ${phase.page} · ${phase.totalSoFar} lecturas hasta ahora · " +
-                    "${(phase.fractionOrZero() * 100).toInt()} %",
+                text = if (knownTotal) {
+                    val pct = (phase.globalFraction() * 100).toInt()
+                    "Página ${phase.page} / ${phase.pagesTotal} · " +
+                        "${phase.totalSoFar} / ${phase.expectedTotal} lecturas · $pct %"
+                } else {
+                    "Página ${phase.page} · ${phase.totalSoFar} lecturas hasta ahora · " +
+                        "${(phase.fractionOrZero() * 100).toInt()} %"
+                },
                 style = MaterialTheme.typography.bodySmall,
             )
             Spacer(Modifier.height(6.dp))
             LinearProgressIndicator(
-                progress = { phase.fractionOrZero() },
+                progress = {
+                    if (knownTotal) phase.globalFraction() else phase.fractionOrZero()
+                },
                 modifier = Modifier.fillMaxWidth().height(6.dp),
             )
         }
@@ -342,6 +399,15 @@ private fun PhaseStatusLine(phase: SyncPhase) {
 private fun SyncPhase.Downloading.fractionOrZero(): Float =
     if (total > 0) received.toFloat() / total else 0f
 
+private fun SyncPhase.Downloading.globalFraction(): Float {
+    if (expectedTotal <= 0) return fractionOrZero()
+    // Bytes received in the current page contribute their own fraction so the
+    // bar moves continuously between page boundaries, not in 1/M jumps.
+    val partial = if (total > 0) received.toFloat() / total else 0f
+    val approx = totalSoFar + partial * (expectedTotal.toFloat() / pagesTotal.coerceAtLeast(1))
+    return (approx / expectedTotal).coerceIn(0f, 1f)
+}
+
 // --- Start button -----------------------------------------------------------
 
 @Composable
@@ -357,7 +423,8 @@ private fun StartButton(phase: SyncPhase, onStart: () -> Unit) {
         Text(
             text = when (phase) {
                 SyncPhase.Idle, is SyncPhase.Done, is SyncPhase.Failed -> "Empezar sincronización"
-                SyncPhase.SyncingTime, is SyncPhase.Downloading, SyncPhase.Persisting ->
+                SyncPhase.SyncingTime, SyncPhase.Counting,
+                is SyncPhase.Downloading, SyncPhase.Persisting ->
                     "En progreso..."
             },
         )
@@ -377,6 +444,19 @@ private suspend fun runStreamingSync(
         onPhase(SyncPhase.SyncingTime)
         active.setTime(nowMs())
 
+        // First ask the Pi how many rows the GET would return so we can show
+        // "Página N / M" with a real denominator. If COUNT fails (e.g. Pi on
+        // an older firmware), fall back to the unknown-total path.
+        onPhase(SyncPhase.Counting)
+        val expectedTotal: Long = try {
+            active.requestRawCount(fromMs = fromMs, toMs = toMs)
+        } catch (e: Throwable) {
+            0L
+        }
+        val pagesTotal: Int =
+            if (expectedTotal > 0) ((expectedTotal + PAGE_SIZE - 1) / PAGE_SIZE).toInt()
+            else 0
+
         // Paginated download: loop until the Pi returns a non-full page
         // or yields nothing. The user picked a date range and expects ALL
         // of it; the app handles batching internally so they never see
@@ -387,7 +467,10 @@ private suspend fun runStreamingSync(
         var page = 0
         while (page < MAX_PAGES) {
             page++
-            onPhase(SyncPhase.Downloading(page = page, totalSoFar = all.size, received = 0, total = 0))
+            onPhase(SyncPhase.Downloading(
+                page = page, pagesTotal = pagesTotal, expectedTotal = expectedTotal,
+                totalSoFar = all.size, received = 0, total = 0,
+            ))
             var pageReadings: List<Reading> = emptyList()
             withTimeout(PAGE_TIMEOUT_MS) {
                 active.requestRawReadingsFlow(
@@ -397,6 +480,8 @@ private suspend fun runStreamingSync(
                         is DownloadProgress.Chunk -> onPhase(
                             SyncPhase.Downloading(
                                 page = page,
+                                pagesTotal = pagesTotal,
+                                expectedTotal = expectedTotal,
                                 totalSoFar = all.size,
                                 received = ev.received,
                                 total = ev.total,

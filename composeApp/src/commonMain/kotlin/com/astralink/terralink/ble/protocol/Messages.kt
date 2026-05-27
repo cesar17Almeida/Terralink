@@ -54,6 +54,23 @@ data class DataRequestMsg(
     val limit: Int? = null,
 )
 
+/**
+ * Same characteristic + range fields as DataRequestMsg, but with op="count".
+ * The Pi replies on data_response with a single chunked frame carrying
+ * {count: N} so the app can show "Página N / M" before paging starts.
+ */
+@Serializable
+data class DataCountRequestMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String = Op.COUNT,
+    val kind: String,
+    val from: Long? = null,
+    val to: Long? = null,
+)
+
+@Serializable
+data class CountMsg(val count: Long)
+
 // --- data_response (notify chunks on CHR_DATA_RESPONSE_UUID) ----------------
 
 @OptIn(ExperimentalSerializationApi::class)
