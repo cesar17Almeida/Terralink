@@ -51,6 +51,8 @@ kotlin {
             implementation(libs.androidx.lifecycle.runtimeCompose)
             implementation(libs.kotlinx.coroutinesCore)
             implementation(libs.kotlinx.serializationCbor)
+            implementation(libs.kotlinx.serializationJson)
+            implementation(libs.androidx.datastore.preferencesCore)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)

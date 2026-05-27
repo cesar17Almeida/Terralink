@@ -10,6 +10,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
 import com.astralink.terralink.ble.AndroidBleContext
+import com.astralink.terralink.state.StationsRepository
+import com.astralink.terralink.state.createStationsDataStore
 
 class MainActivity : ComponentActivity() {
 
@@ -21,6 +23,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         AndroidBleContext.init(applicationContext)
+        StationsRepository.init(createStationsDataStore())
         requestPermissions.launch(blePermissions())
 
         setContent {

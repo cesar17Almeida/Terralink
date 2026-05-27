@@ -4,6 +4,7 @@ android-compileSdk = "36"
 android-minSdk = "24"
 android-targetSdk = "36"
 androidx-activity = "1.13.0"
+androidx-datastore = "1.1.6"
 androidx-appcompat = "1.7.1"
 androidx-core = "1.18.0"
 androidx-espresso = "3.7.0"
@@ -38,6 +39,8 @@ compose-uiToolingPreview = { module = "org.jetbrains.compose.ui:ui-tooling-previ
 kotlinx-coroutinesSwing = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-swing", version.ref = "kotlinx-coroutines" }
 kotlinx-coroutinesCore = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
 kotlinx-serializationCbor = { module = "org.jetbrains.kotlinx:kotlinx-serialization-cbor", version.ref = "kotlinx-serialization" }
+kotlinx-serializationJson = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinx-serialization" }
+androidx-datastore-preferencesCore = { module = "androidx.datastore:datastore-preferences-core", version.ref = "androidx-datastore" }
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }

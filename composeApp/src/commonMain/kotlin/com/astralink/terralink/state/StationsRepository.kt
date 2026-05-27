@@ -1,40 +1,104 @@
 package com.astralink.terralink.state
 
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
 import com.astralink.terralink.model.SavedStation
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
 
 /**
- * In-memory list of stations the user has paired with. Singleton so
- * every screen sees the same list. State is wiped on app restart;
- * migrate to DataStore (kotlinx-serialization) when we want persistence.
+ * The list of stations the user has paired with. Persisted in a single
+ * DataStore preference entry serialized as a JSON array.
+ *
+ * Stays a singleton object so call sites (StationsListScreen, ScanScreen,
+ * App.kt) keep their non-suspend API. The actual persistence happens off
+ * a background scope; the in-memory StateFlow is the authoritative
+ * source for the UI and is kept in sync by collecting the DataStore Flow.
+ *
+ * `init(store)` must be invoked once at app launch with the platform
+ * DataStore (see StationsDataStore expect/actual). Calling add/remove/
+ * find/updateLastSync before init throws on first persistence write.
  */
 object StationsRepository {
 
     private val _stations = MutableStateFlow<List<SavedStation>>(emptyList())
     val stations: StateFlow<List<SavedStation>> = _stations.asStateFlow()
 
-    /** Add a station, or keep the existing entry if `bleId` matches. */
+    private lateinit var store: DataStore<Preferences>
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val key = stringPreferencesKey("stations_json")
+    private val json = Json { ignoreUnknownKeys = true }
+    private var initialized = false
+
+    fun init(store: DataStore<Preferences>) {
+        if (initialized) return
+        this.store = store
+        initialized = true
+        // Hot-loop the preference flow into our StateFlow so the UI reflects
+        // both startup-load and any subsequent edits we make.
+        ioScope.launch {
+            store.data.collect { prefs ->
+                _stations.value = decode(prefs[key])
+            }
+        }
+    }
+
     fun add(station: SavedStation) {
-        _stations.update { current ->
-            if (current.any { it.bleId == station.bleId }) current
-            else current + station
+        requireInitialized()
+        ioScope.launch {
+            store.edit { prefs ->
+                val current = decode(prefs[key])
+                if (current.none { it.bleId == station.bleId }) {
+                    prefs[key] = json.encodeToString(current + station)
+                }
+            }
         }
     }
 
     fun remove(bleId: String) {
-        _stations.update { current -> current.filterNot { it.bleId == bleId } }
+        requireInitialized()
+        ioScope.launch {
+            store.edit { prefs ->
+                val current = decode(prefs[key])
+                prefs[key] = json.encodeToString(current.filterNot { it.bleId == bleId })
+            }
+        }
     }
 
     fun find(bleId: String): SavedStation? =
         _stations.value.firstOrNull { it.bleId == bleId }
 
-    /** Set lastSyncMs on the matching station; no-op if not registered. */
     fun updateLastSync(bleId: String, ms: Long) {
-        _stations.update { current ->
-            current.map { if (it.bleId == bleId) it.copy(lastSyncMs = ms) else it }
+        requireInitialized()
+        ioScope.launch {
+            store.edit { prefs ->
+                val current = decode(prefs[key])
+                val updated = current.map {
+                    if (it.bleId == bleId) it.copy(lastSyncMs = ms) else it
+                }
+                prefs[key] = json.encodeToString(updated)
+            }
+        }
+    }
+
+    private fun decode(raw: String?): List<SavedStation> {
+        if (raw.isNullOrEmpty()) return emptyList()
+        return runCatching { json.decodeFromString<List<SavedStation>>(raw) }
+            .getOrElse { emptyList() }
+    }
+
+    private fun requireInitialized() {
+        check(initialized) {
+            "StationsRepository not initialized. Call init(createStationsDataStore()) " +
+                "from MainActivity.onCreate or MainViewController() before composing App()."
         }
     }
 }
