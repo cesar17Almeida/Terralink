@@ -30,4 +30,11 @@ object StationsRepository {
 
     fun find(bleId: String): SavedStation? =
         _stations.value.firstOrNull { it.bleId == bleId }
+
+    /** Set lastSyncMs on the matching station; no-op if not registered. */
+    fun updateLastSync(bleId: String, ms: Long) {
+        _stations.update { current ->
+            current.map { if (it.bleId == bleId) it.copy(lastSyncMs = ms) else it }
+        }
+    }
 }

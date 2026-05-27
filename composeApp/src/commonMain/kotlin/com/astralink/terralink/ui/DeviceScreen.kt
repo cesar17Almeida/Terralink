@@ -26,22 +26,36 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.astralink.terralink.ble.BleError
 import com.astralink.terralink.ble.protocol.StatusMsg
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.ble.session.SaviaSession
 import com.astralink.terralink.model.SavedStation
+import com.astralink.terralink.state.StationsRepository
 import com.astralink.terralink.ui.components.ConnectionStatusChip
+import com.astralink.terralink.util.nowMs
+import kotlinx.coroutines.launch
+
+private const val DEFAULT_LOOKBACK_MS = 24L * 60 * 60 * 1000  // 24h
 
 private sealed class ConnState {
     data object Connecting : ConnState()
     data class Ready(val session: ActiveSession, val status: StatusMsg) : ConnState()
     data class Failed(val message: String) : ConnState()
+}
+
+private sealed class SyncState {
+    data object Idle : SyncState()
+    data object Running : SyncState()
+    data class Done(val count: Int, val atMs: Long) : SyncState()
+    data class Failed(val message: String) : SyncState()
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -51,15 +65,19 @@ fun DeviceScreen(
     session: SaviaSession,
     onUpdateFirmware: (ActiveSession) -> Unit,
     onBack: () -> Unit,
-    onSyncData: (ActiveSession) -> Unit = {},
 ) {
     var state by remember { mutableStateOf<ConnState>(ConnState.Connecting) }
     var retryKey by remember { mutableStateOf(0) }
 
-    LaunchedEffect(station.bleId, retryKey) {
+    // Re-read the saved station from the repo so updateLastSync() shows up
+    // in the UI without needing to navigate back and forth.
+    val stations by StationsRepository.stations.collectAsStateWithLifecycle()
+    val currentStation = stations.firstOrNull { it.bleId == station.bleId } ?: station
+
+    LaunchedEffect(currentStation.bleId, retryKey) {
         state = ConnState.Connecting
         state = try {
-            val active = session.connect(station.bleId)
+            val active = session.connect(currentStation.bleId)
             val status = active.readStatus()
             ConnState.Ready(active, status)
         } catch (e: BleError) {
@@ -73,7 +91,7 @@ fun DeviceScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(text = station.displayName, fontWeight = FontWeight.SemiBold)
+                    Text(text = currentStation.displayName, fontWeight = FontWeight.SemiBold)
                 },
                 navigationIcon = {
                     TextButton(onClick = onBack) { Text("Atrás") }
@@ -83,16 +101,16 @@ fun DeviceScreen(
     ) { innerPadding ->
         Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
             when (val s = state) {
-                ConnState.Connecting -> ConnectingPanel(station)
+                ConnState.Connecting -> ConnectingPanel(currentStation)
                 is ConnState.Failed -> FailedPanel(
                     message = s.message,
                     onRetry = { retryKey++ },
                 )
                 is ConnState.Ready -> ReadyPanel(
-                    station = station,
+                    station = currentStation,
                     status = s.status,
+                    active = s.session,
                     onUpdateFirmware = { onUpdateFirmware(s.session) },
-                    onSyncData = { onSyncData(s.session) },
                 )
             }
         }
@@ -142,9 +160,12 @@ private fun FailedPanel(message: String, onRetry: () -> Unit) {
 private fun ReadyPanel(
     station: SavedStation,
     status: StatusMsg,
+    active: ActiveSession,
     onUpdateFirmware: () -> Unit,
-    onSyncData: () -> Unit,
 ) {
+    var syncState by remember { mutableStateOf<SyncState>(SyncState.Idle) }
+    val scope = rememberCoroutineScope()
+
     Column(
         modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
@@ -163,9 +184,66 @@ private fun ReadyPanel(
             Text("Actualizar firmware")
         }
         Spacer(Modifier.height(8.dp))
-        OutlinedButton(onClick = onSyncData, modifier = Modifier.fillMaxWidth()) {
-            Text("Sincronizar datos")
+        OutlinedButton(
+            onClick = {
+                scope.launch { runSync(active, station, onState = { syncState = it }) }
+            },
+            enabled = syncState !is SyncState.Running,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(if (syncState is SyncState.Running) "Sincronizando..." else "Sincronizar datos")
         }
+
+        Spacer(Modifier.height(12.dp))
+        SyncStatusBanner(state = syncState)
+    }
+}
+
+/**
+ * Runs the sync flow: push the wall clock to the Pi, pull readings since
+ * the last sync (or 24h back if first time), and persist the new mark.
+ * Errors are surfaced via `onState(SyncState.Failed)`; the connection is
+ * not torn down -- the user can retry without re-pairing.
+ */
+private suspend fun runSync(
+    active: ActiveSession,
+    station: SavedStation,
+    onState: (SyncState) -> Unit,
+) {
+    onState(SyncState.Running)
+    try {
+        val now = nowMs()
+        active.setTime(now)
+        val from = station.lastSyncMs ?: (now - DEFAULT_LOOKBACK_MS)
+        val readings = active.requestRawReadings(fromMs = from, toMs = now)
+        StationsRepository.updateLastSync(station.bleId, now)
+        onState(SyncState.Done(count = readings.size, atMs = now))
+    } catch (e: BleError) {
+        onState(SyncState.Failed(e.message ?: e::class.simpleName ?: "sync failed"))
+    } catch (e: Throwable) {
+        onState(SyncState.Failed(e.message ?: e::class.simpleName ?: "unexpected error"))
+    }
+}
+
+@Composable
+private fun SyncStatusBanner(state: SyncState) {
+    when (state) {
+        SyncState.Idle -> Unit
+        SyncState.Running -> Text(
+            text = "Enviando hora y solicitando lecturas...",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        is SyncState.Done -> Text(
+            text = "Listo: ${state.count} lecturas descargadas (${formatRelativeMs(state.atMs)}).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        is SyncState.Failed -> Text(
+            text = "Error de sincronización: ${state.message}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
     }
 }
 
@@ -204,7 +282,7 @@ private fun DeviceStatusCard(station: SavedStation, status: StatusMsg) {
             Spacer(Modifier.height(8.dp))
             InfoRow(
                 label = "Último sync",
-                value = status.lastSyncMs?.let { formatRelativeMs(it) } ?: "Sin sync",
+                value = station.lastSyncMs?.let { formatRelativeMs(it) } ?: "Sin sync",
             )
         }
     }
@@ -239,7 +317,13 @@ private fun formatUptime(seconds: Long): String {
 }
 
 private fun formatRelativeMs(ms: Long): String {
-    // Best-effort "hace N min" without pulling a real clock; we don't have
-    // a kotlinx-datetime dep yet, so just dump the raw value for now.
-    return "$ms ms"
+    val delta = nowMs() - ms
+    val minutes = delta / 60_000
+    return when {
+        delta < 30_000 -> "hace instantes"
+        minutes < 1 -> "hace menos de 1 min"
+        minutes < 60 -> "hace ${minutes} min"
+        minutes < 1440 -> "hace ${minutes / 60} h"
+        else -> "hace ${minutes / 1440} d"
+    }
 }

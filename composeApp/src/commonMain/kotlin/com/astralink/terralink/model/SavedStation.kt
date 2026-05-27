@@ -10,4 +10,6 @@ data class SavedStation(
     val bleId: String,
     val displayName: String,
     val pairedAtMs: Long,
+    /** Epoch ms of the last successful sync; null if never synced. */
+    val lastSyncMs: Long? = null,
 )
