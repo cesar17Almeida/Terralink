@@ -14,6 +14,7 @@ import com.astralink.terralink.state.StationsRepository
 import com.astralink.terralink.ui.DeviceScreen
 import com.astralink.terralink.ui.ScanScreen
 import com.astralink.terralink.ui.StationsListScreen
+import com.astralink.terralink.ui.SyncScreen
 import com.astralink.terralink.ui.UpdateFirmwareScreen
 import com.astralink.terralink.util.nowMs
 
@@ -22,6 +23,7 @@ private sealed interface Screen {
     data object Scan : Screen
     data class Device(val station: SavedStation) : Screen
     data class UpdateFirmware(val station: SavedStation) : Screen
+    data class Sync(val station: SavedStation) : Screen
 }
 
 @Composable
@@ -30,8 +32,9 @@ fun App() {
     MaterialTheme {
         val session = remember { SaviaSession() }
         var screen by remember { mutableStateOf<Screen>(Screen.StationsList) }
-        // Shared between Device and UpdateFirmware so the L2CAP transfer
-        // reuses the same connection rather than reconnecting on navigation.
+        // Shared across Device / UpdateFirmware / Sync so the L2CAP transfer
+        // and the readings stream reuse the same connection rather than
+        // reconnecting on every navigation.
         var activeSession by remember { mutableStateOf<ActiveSession?>(null) }
 
         when (val current = screen) {
@@ -66,6 +69,10 @@ fun App() {
                     activeSession = active
                     screen = Screen.UpdateFirmware(current.station)
                 },
+                onSyncData = { active ->
+                    activeSession = active
+                    screen = Screen.Sync(current.station)
+                },
                 onBack = {
                     activeSession = null
                     screen = Screen.StationsList
@@ -80,6 +87,19 @@ fun App() {
                     screen = Screen.Device(current.station)
                 } else {
                     UpdateFirmwareScreen(
+                        station = current.station,
+                        active = active,
+                        onBack = { screen = Screen.Device(current.station) },
+                    )
+                }
+            }
+
+            is Screen.Sync -> {
+                val active = activeSession
+                if (active == null) {
+                    screen = Screen.Device(current.station)
+                } else {
+                    SyncScreen(
                         station = current.station,
                         active = active,
                         onBack = { screen = Screen.Device(current.station) },

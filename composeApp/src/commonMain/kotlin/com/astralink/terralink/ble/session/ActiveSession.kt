@@ -27,12 +27,15 @@ import com.astralink.terralink.ble.protocol.WeatherData
 import com.astralink.terralink.ble.protocol.WeatherMsg
 import com.astralink.terralink.ble.util.sha256
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.ProducerScope
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.takeWhile
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.decodeFromByteArray
@@ -101,6 +104,44 @@ class ActiveSession internal constructor(
         toMs: Long? = null,
         limit: Int? = null,
     ): List<Prediction> = decodePayload(requestData(DataKind.PRED, fromMs, toMs, limit))
+
+    /**
+     * Streaming variant of requestRawReadings: emits DownloadProgress.Chunk
+     * for every notify chunk the Pi sends (so the UI can show a real
+     * percentage) and a final DownloadProgress.Complete with the decoded
+     * List<Reading>. Wraps the same underlying GATT write+notify flow.
+     *
+     * Callers should still wrap the collect in withTimeout if they want a
+     * hard cap (the synchronous requestData() above already does that for
+     * the non-streaming path).
+     */
+    @OptIn(ExperimentalSerializationApi::class)
+    fun requestRawReadingsFlow(
+        fromMs: Long? = null,
+        toMs: Long? = null,
+        limit: Int? = null,
+    ): Flow<DownloadProgress> = channelFlow {
+        val collected = mutableListOf<ByteArray>()
+        val collector = launch {
+            dataResponseFlow
+                .takeWhile { raw ->
+                    collected.add(raw)
+                    val msg = decode<DataChunkMsg>(raw)
+                    // Send a snapshot of progress so the UI can advance smoothly.
+                    trySend(DownloadProgress.Chunk(received = msg.s + 1, total = msg.t))
+                    !msg.eof
+                }
+                .collect {}
+        }
+        connection.write(
+            CHR_DATA_REQUEST_UUID,
+            encode(DataRequestMsg(kind = DataKind.RAW, from = fromMs, to = toMs, limit = limit)),
+        )
+        collector.join()
+        val payload = chunkedDecode(collected)
+        val readings = SaviaCbor.decodeFromByteArray<List<Reading>>(payload)
+        send(DownloadProgress.Complete(readings))
+    }
 
     /**
      * Lower-level helper used by the typed `request*` methods. Issues a

@@ -9,14 +9,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -26,7 +29,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,26 +40,15 @@ import com.astralink.terralink.ble.protocol.StatusMsg
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.ble.session.SaviaSession
 import com.astralink.terralink.model.SavedStation
-import com.astralink.terralink.state.ReadingsRepository
 import com.astralink.terralink.state.StationsRepository
 import com.astralink.terralink.ui.components.ConnectionStatusChip
+import com.astralink.terralink.ui.components.PremiumTile
 import com.astralink.terralink.util.nowMs
-import kotlinx.coroutines.launch
-
-private const val DEFAULT_LOOKBACK_MS = 24L * 60 * 60 * 1000  // 24h
-private const val SYNC_LIMIT = 500                              // rows per request
 
 private sealed class ConnState {
     data object Connecting : ConnState()
     data class Ready(val session: ActiveSession, val status: StatusMsg) : ConnState()
     data class Failed(val message: String) : ConnState()
-}
-
-private sealed class SyncState {
-    data object Idle : SyncState()
-    data object Running : SyncState()
-    data class Done(val count: Int, val atMs: Long, val more: Boolean) : SyncState()
-    data class Failed(val message: String) : SyncState()
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -66,13 +57,12 @@ fun DeviceScreen(
     station: SavedStation,
     session: SaviaSession,
     onUpdateFirmware: (ActiveSession) -> Unit,
+    onSyncData: (ActiveSession) -> Unit,
     onBack: () -> Unit,
 ) {
     var state by remember { mutableStateOf<ConnState>(ConnState.Connecting) }
     var retryKey by remember { mutableStateOf(0) }
 
-    // Re-read the saved station from the repo so updateLastSync() shows up
-    // in the UI without needing to navigate back and forth.
     val stations by StationsRepository.stations.collectAsStateWithLifecycle()
     val currentStation = stations.firstOrNull { it.bleId == station.bleId } ?: station
 
@@ -104,15 +94,12 @@ fun DeviceScreen(
         Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
             when (val s = state) {
                 ConnState.Connecting -> ConnectingPanel(currentStation)
-                is ConnState.Failed -> FailedPanel(
-                    message = s.message,
-                    onRetry = { retryKey++ },
-                )
+                is ConnState.Failed -> FailedPanel(s.message, onRetry = { retryKey++ })
                 is ConnState.Ready -> ReadyPanel(
                     station = currentStation,
                     status = s.status,
-                    active = s.session,
                     onUpdateFirmware = { onUpdateFirmware(s.session) },
+                    onSyncData = { onSyncData(s.session) },
                 )
             }
         }
@@ -162,119 +149,72 @@ private fun FailedPanel(message: String, onRetry: () -> Unit) {
 private fun ReadyPanel(
     station: SavedStation,
     status: StatusMsg,
-    active: ActiveSession,
     onUpdateFirmware: () -> Unit,
+    onSyncData: () -> Unit,
 ) {
-    var syncState by remember { mutableStateOf<SyncState>(SyncState.Idle) }
-    val scope = rememberCoroutineScope()
-
     Column(
-        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Text(
-            text = "Estado",
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(8.dp))
-
         DeviceStatusCard(station = station, status = status)
-
-        Spacer(Modifier.height(24.dp))
-
-        Button(onClick = onUpdateFirmware, modifier = Modifier.fillMaxWidth()) {
-            Text("Actualizar firmware")
-        }
-        Spacer(Modifier.height(8.dp))
-        OutlinedButton(
-            onClick = {
-                scope.launch { runSync(active, station, onState = { syncState = it }) }
-            },
-            enabled = syncState !is SyncState.Running,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text(if (syncState is SyncState.Running) "Sincronizando..." else "Sincronizar datos")
-        }
-
-        Spacer(Modifier.height(12.dp))
-        SyncStatusBanner(state = syncState)
-    }
-}
-
-/**
- * Runs the sync flow: push the wall clock to the Pi, pull readings since
- * the last sync (or 24h back if first time), and persist the new mark.
- * Errors are surfaced via `onState(SyncState.Failed)`; the connection is
- * not torn down -- the user can retry without re-pairing.
- */
-private suspend fun runSync(
-    active: ActiveSession,
-    station: SavedStation,
-    onState: (SyncState) -> Unit,
-) {
-    onState(SyncState.Running)
-    try {
-        val now = nowMs()
-        active.setTime(now)
-        val from = station.lastSyncMs ?: (now - DEFAULT_LOOKBACK_MS)
-        // Paginate so a single request never blows past the chunked-notify
-        // throughput budget. Each row is ~70 B CBOR; 500 rows fit in ~6 s
-        // of notify traffic, well under our 15 s timeout.
-        val readings = active.requestRawReadings(
-            fromMs = from, toMs = now, limit = SYNC_LIMIT,
-        )
-        // Persist the batch into the local SQL cache so the data survives
-        // app restarts and SyncScreen's chart can read it back without
-        // another network round-trip. INSERT OR IGNORE dedups if the user
-        // re-syncs an overlapping window.
-        if (readings.isNotEmpty()) {
-            ReadingsRepository.insertBatch(station.bleId, readings)
-        }
-        // Advance the cursor to the timestamp of the last reading we got, so
-        // a follow-up sync picks up exactly where this one left off (avoids
-        // re-downloading the same window if the server had more than the limit).
-        val nextSyncFrom = readings.lastOrNull()?.tsMs?.plus(1) ?: now
-        StationsRepository.updateLastSync(station.bleId, nextSyncFrom)
-        val more = readings.size >= SYNC_LIMIT
-        onState(SyncState.Done(count = readings.size, atMs = now, more = more))
-    } catch (e: BleError) {
-        onState(SyncState.Failed(e.message ?: e::class.simpleName ?: "sync failed"))
-    } catch (e: Throwable) {
-        onState(SyncState.Failed(e.message ?: e::class.simpleName ?: "unexpected error"))
+        TileGrid(onUpdateFirmware = onUpdateFirmware, onSyncData = onSyncData)
     }
 }
 
 @Composable
-private fun SyncStatusBanner(state: SyncState) {
-    when (state) {
-        SyncState.Idle -> Unit
-        SyncState.Running -> Text(
-            text = "Enviando hora y solicitando lecturas...",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        is SyncState.Done -> Text(
-            text = if (state.more)
-                "Listo: ${state.count} lecturas descargadas. " +
-                "Hay más pendientes — pulsa de nuevo para continuar."
-            else
-                "Listo: ${state.count} lecturas descargadas (${formatRelativeMs(state.atMs)}).",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.primary,
-        )
-        is SyncState.Failed -> Text(
-            text = "Error de sincronización: ${state.message}",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.error,
-        )
+private fun TileGrid(
+    onUpdateFirmware: () -> Unit,
+    onSyncData: () -> Unit,
+) {
+    // 2-column manual grid -- LazyVerticalGrid would be overkill for 4 items
+    // and we want both rows always visible inside the parent scroll.
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            PremiumTile(
+                title = "Actualizar firmware",
+                caption = "Subir un .bin nuevo por BLE",
+                glyph = "⬆",
+                onClick = onUpdateFirmware,
+                modifier = Modifier.weight(1f),
+            )
+            PremiumTile(
+                title = "Sincronizar datos",
+                caption = "Descargar lecturas del sensor",
+                glyph = "↻",
+                onClick = onSyncData,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            PremiumTile(
+                title = "Diagnóstico",
+                caption = "Próximamente",
+                glyph = "ℹ",
+                onClick = {},
+                enabled = false,
+                modifier = Modifier.weight(1f),
+            )
+            PremiumTile(
+                title = "Configurar sensores",
+                caption = "Próximamente",
+                glyph = "⚙",
+                onClick = {},
+                enabled = false,
+                modifier = Modifier.weight(1f),
+            )
+        }
     }
 }
 
 @Composable
 private fun DeviceStatusCard(station: SavedStation, status: StatusMsg) {
-    Card(
+    ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        shape = RoundedCornerShape(20.dp),
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
     ) {
         Column(modifier = Modifier.padding(20.dp)) {
             Row(
@@ -285,6 +225,7 @@ private fun DeviceStatusCard(station: SavedStation, status: StatusMsg) {
                 Text(
                     text = station.displayName,
                     style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
                 )
                 ConnectionStatusChip(connected = true)
             }
