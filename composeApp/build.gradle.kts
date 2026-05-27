@@ -8,6 +8,15 @@ plugins {
     alias(libs.plugins.composeCompiler)
     alias(libs.plugins.composeHotReload)
     alias(libs.plugins.kotlinSerialization)
+    alias(libs.plugins.sqldelight)
+}
+
+sqldelight {
+    databases {
+        create("TerralinkDb") {
+            packageName.set("com.astralink.terralink.db")
+        }
+    }
 }
 
 kotlin {
@@ -39,6 +48,10 @@ kotlin {
         androidMain.dependencies {
             implementation(libs.compose.uiToolingPreview)
             implementation(libs.androidx.activity.compose)
+            implementation(libs.sqldelight.androidDriver)
+        }
+        iosMain.dependencies {
+            implementation(libs.sqldelight.nativeDriver)
         }
         commonMain.dependencies {
             implementation(libs.compose.runtime)
@@ -53,6 +66,7 @@ kotlin {
             implementation(libs.kotlinx.serializationCbor)
             implementation(libs.kotlinx.serializationJson)
             implementation(libs.androidx.datastore.preferencesCore)
+            implementation(libs.sqldelight.coroutinesExtensions)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
@@ -60,6 +74,7 @@ kotlin {
         jvmMain.dependencies {
             implementation(compose.desktop.currentOs)
             implementation(libs.kotlinx.coroutinesSwing)
+            implementation(libs.sqldelight.sqliteDriver)
         }
     }
 }

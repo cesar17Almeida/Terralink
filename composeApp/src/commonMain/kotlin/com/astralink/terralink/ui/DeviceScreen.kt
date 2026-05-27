@@ -38,6 +38,7 @@ import com.astralink.terralink.ble.protocol.StatusMsg
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.ble.session.SaviaSession
 import com.astralink.terralink.model.SavedStation
+import com.astralink.terralink.state.ReadingsRepository
 import com.astralink.terralink.state.StationsRepository
 import com.astralink.terralink.ui.components.ConnectionStatusChip
 import com.astralink.terralink.util.nowMs
@@ -222,6 +223,13 @@ private suspend fun runSync(
         val readings = active.requestRawReadings(
             fromMs = from, toMs = now, limit = SYNC_LIMIT,
         )
+        // Persist the batch into the local SQL cache so the data survives
+        // app restarts and SyncScreen's chart can read it back without
+        // another network round-trip. INSERT OR IGNORE dedups if the user
+        // re-syncs an overlapping window.
+        if (readings.isNotEmpty()) {
+            ReadingsRepository.insertBatch(station.bleId, readings)
+        }
         // Advance the cursor to the timestamp of the last reading we got, so
         // a follow-up sync picks up exactly where this one left off (avoids
         // re-downloading the same window if the server had more than the limit).

@@ -1,0 +1,37 @@
+-- Local cache of sensor readings the app has pulled from one or more Pis.
+-- Composite primary key gives us "INSERT OR IGNORE" dedup if the same
+-- reading is pulled twice (e.g. user re-syncs an overlapping window).
+
+CREATE TABLE Reading (
+    station_id TEXT    NOT NULL,
+    ts_ms      INTEGER NOT NULL,
+    port       INTEGER NOT NULL,
+    kind       TEXT    NOT NULL,
+    value      REAL    NOT NULL,
+    depth_cm   INTEGER,
+    PRIMARY KEY (station_id, ts_ms, port, kind, depth_cm)
+);
+
+CREATE INDEX reading_station_ts ON Reading(station_id, ts_ms);
+
+insertReading:
+INSERT OR IGNORE INTO Reading(station_id, ts_ms, port, kind, value, depth_cm)
+VALUES (?, ?, ?, ?, ?, ?);
+
+countByStation:
+SELECT COUNT(*) FROM Reading WHERE station_id = ?;
+
+maxTsByStation:
+SELECT MAX(ts_ms) FROM Reading WHERE station_id = ?;
+
+selectByRange:
+SELECT *
+FROM Reading
+WHERE station_id = ?
+  AND ts_ms >= ?
+  AND ts_ms <  ?
+ORDER BY ts_ms ASC
+LIMIT ?;
+
+deleteByStation:
+DELETE FROM Reading WHERE station_id = ?;
