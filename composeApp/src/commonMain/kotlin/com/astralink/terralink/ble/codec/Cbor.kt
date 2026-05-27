@@ -13,6 +13,12 @@ class CodecError(message: String, cause: Throwable? = null) : RuntimeException(m
 val SaviaCbor: Cbor = Cbor {
     // Forward-compat: future protocol versions may add fields we don't know about.
     ignoreUnknownKeys = true
+    // CRITICAL for interop with the Pi: kotlinx-serialization omits fields
+    // that hold their declared default by default, which would drop `v` and
+    // `op` (both have defaults) from every control message. The Python side
+    // would then see `v=None` and reject the request as a bad protocol
+    // version. Force defaults to be encoded so the wire stays self-describing.
+    encodeDefaults = true
 }
 
 @OptIn(ExperimentalSerializationApi::class)
