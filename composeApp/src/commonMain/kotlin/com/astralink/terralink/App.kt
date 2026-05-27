@@ -13,12 +13,14 @@ import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.StationsRepository
 import com.astralink.terralink.ui.DeviceScreen
 import com.astralink.terralink.ui.ScanScreen
+import com.astralink.terralink.ui.SplashScreen
 import com.astralink.terralink.ui.StationsListScreen
 import com.astralink.terralink.ui.SyncScreen
 import com.astralink.terralink.ui.UpdateFirmwareScreen
 import com.astralink.terralink.util.nowMs
 
 private sealed interface Screen {
+    data object Splash : Screen
     data object StationsList : Screen
     data object Scan : Screen
     data class Device(val station: SavedStation) : Screen
@@ -31,13 +33,17 @@ private sealed interface Screen {
 fun App() {
     MaterialTheme {
         val session = remember { SaviaSession() }
-        var screen by remember { mutableStateOf<Screen>(Screen.StationsList) }
+        var screen by remember { mutableStateOf<Screen>(Screen.Splash) }
         // Shared across Device / UpdateFirmware / Sync so the L2CAP transfer
         // and the readings stream reuse the same connection rather than
         // reconnecting on every navigation.
         var activeSession by remember { mutableStateOf<ActiveSession?>(null) }
 
         when (val current = screen) {
+            Screen.Splash -> SplashScreen(
+                onTimeout = { screen = Screen.StationsList },
+            )
+
             Screen.StationsList -> StationsListScreen(
                 session = session,
                 onAddStation = { screen = Screen.Scan },

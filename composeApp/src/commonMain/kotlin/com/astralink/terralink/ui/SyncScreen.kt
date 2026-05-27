@@ -45,6 +45,12 @@ import com.astralink.terralink.ble.BleError
 import com.astralink.terralink.ble.protocol.Reading
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.ble.session.DownloadProgress
+import com.astralink.terralink.export.CSV_MIME
+import com.astralink.terralink.export.JSON_MIME
+import com.astralink.terralink.export.exportFileName
+import com.astralink.terralink.export.readingsToCsv
+import com.astralink.terralink.export.readingsToJson
+import com.astralink.terralink.export.rememberExporter
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.ReadingsRepository
 import com.astralink.terralink.state.StationsRepository
@@ -59,15 +65,27 @@ import com.astralink.terralink.util.nowMs
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 
-private const val MAX_ROWS_PER_SYNC = 2_000
-private const val SYNC_TIMEOUT_MS = 60_000L
+// Per-page hard cap to keep each notify stream under our per-page timeout.
+// We page automatically until the Pi returns less than this, so the user
+// always gets the full requested range without re-pulsing.
+private const val PAGE_SIZE = 500
+private const val PAGE_TIMEOUT_MS = 30_000L
+// Safety net: stop after this many pages even if the Pi keeps returning
+// full pages. 200 * 500 = 100k readings, ~13 hours of mock data at 12 rows
+// / 30s; plenty of margin and protects against pathological loops.
+private const val MAX_PAGES = 200
 
 private sealed class SyncPhase {
     data object Idle : SyncPhase()
     data object SyncingTime : SyncPhase()
-    data class Downloading(val received: Int, val total: Int) : SyncPhase()
+    data class Downloading(
+        val page: Int,
+        val totalSoFar: Int,
+        val received: Int,
+        val total: Int,
+    ) : SyncPhase()
     data object Persisting : SyncPhase()
-    data class Done(val readings: List<Reading>, val more: Boolean) : SyncPhase()
+    data class Done(val readings: List<Reading>) : SyncPhase()
     data class Failed(val message: String) : SyncPhase()
 }
 
@@ -158,6 +176,11 @@ fun SyncScreen(
                         yLabel = if (kindFilter == KindFilter.Moisture) "%" else "°C",
                     )
                 }
+
+                ExportSection(
+                    station = station,
+                    readings = done.readings,
+                )
             }
         }
     }
@@ -289,8 +312,8 @@ private fun PhaseStatusLine(phase: SyncPhase) {
         )
         is SyncPhase.Downloading -> Column {
             Text(
-                "Descargando: ${phase.received} / ${phase.total} chunks " +
-                    "(${(phase.fractionOrZero() * 100).toInt()} %)",
+                "Página ${phase.page} · ${phase.totalSoFar} lecturas hasta ahora · " +
+                    "${(phase.fractionOrZero() * 100).toInt()} %",
                 style = MaterialTheme.typography.bodySmall,
             )
             Spacer(Modifier.height(6.dp))
@@ -304,11 +327,7 @@ private fun PhaseStatusLine(phase: SyncPhase) {
             style = MaterialTheme.typography.bodySmall,
         )
         is SyncPhase.Done -> Text(
-            buildString {
-                append("Listo: ${phase.readings.size} lecturas descargadas")
-                if (phase.more) append(" — hay más datos, repite para continuar")
-                else append(".")
-            },
+            text = "Listo: ${phase.readings.size} lecturas descargadas.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.primary,
         )
@@ -358,39 +377,99 @@ private suspend fun runStreamingSync(
         onPhase(SyncPhase.SyncingTime)
         active.setTime(nowMs())
 
-        onPhase(SyncPhase.Downloading(received = 0, total = 0))
-        var collected: List<Reading> = emptyList()
-        withTimeout(SYNC_TIMEOUT_MS) {
-            active.requestRawReadingsFlow(
-                fromMs = fromMs, toMs = toMs, limit = MAX_ROWS_PER_SYNC,
-            ).collect { ev ->
-                when (ev) {
-                    is DownloadProgress.Chunk ->
-                        onPhase(SyncPhase.Downloading(ev.received, ev.total))
-                    is DownloadProgress.Complete -> {
-                        collected = ev.readings
+        // Paginated download: loop until the Pi returns a non-full page
+        // or yields nothing. The user picked a date range and expects ALL
+        // of it; the app handles batching internally so they never see
+        // "hay más, repite". PAGE_SIZE keeps each request below our
+        // per-page timeout (~5-10s of notify traffic).
+        val all = mutableListOf<Reading>()
+        var nextFrom = fromMs
+        var page = 0
+        while (page < MAX_PAGES) {
+            page++
+            onPhase(SyncPhase.Downloading(page = page, totalSoFar = all.size, received = 0, total = 0))
+            var pageReadings: List<Reading> = emptyList()
+            withTimeout(PAGE_TIMEOUT_MS) {
+                active.requestRawReadingsFlow(
+                    fromMs = nextFrom, toMs = toMs, limit = PAGE_SIZE,
+                ).collect { ev ->
+                    when (ev) {
+                        is DownloadProgress.Chunk -> onPhase(
+                            SyncPhase.Downloading(
+                                page = page,
+                                totalSoFar = all.size,
+                                received = ev.received,
+                                total = ev.total,
+                            )
+                        )
+                        is DownloadProgress.Complete -> pageReadings = ev.readings
                     }
                 }
             }
+            if (pageReadings.isEmpty()) break
+            all += pageReadings
+            // Move the cursor past the last reading we got so the next page
+            // doesn't re-include it. tsMs ranges are inclusive on `from`.
+            nextFrom = (pageReadings.last().tsMs + 1)
+            if (pageReadings.size < PAGE_SIZE) break  // server drained
         }
 
         onPhase(SyncPhase.Persisting)
-        if (collected.isNotEmpty()) {
-            ReadingsRepository.insertBatch(station.bleId, collected)
+        if (all.isNotEmpty()) {
+            ReadingsRepository.insertBatch(station.bleId, all)
         }
-        val nextCursor = collected.lastOrNull()?.tsMs?.plus(1) ?: toMs
+        val nextCursor = all.lastOrNull()?.tsMs?.plus(1) ?: toMs
         StationsRepository.updateLastSync(station.bleId, nextCursor)
 
-        onPhase(
-            SyncPhase.Done(
-                readings = collected,
-                more = collected.size >= MAX_ROWS_PER_SYNC,
-            ),
-        )
+        onPhase(SyncPhase.Done(readings = all))
     } catch (e: BleError) {
         onPhase(SyncPhase.Failed(e.message ?: e::class.simpleName ?: "sync failed"))
     } catch (e: Throwable) {
         onPhase(SyncPhase.Failed(e.message ?: e::class.simpleName ?: "unexpected error"))
+    }
+}
+
+// --- Export ----------------------------------------------------------------
+
+@Composable
+private fun ExportSection(
+    station: SavedStation,
+    readings: List<Reading>,
+) {
+    val exporter = rememberExporter()
+    SectionCard(title = "Exportar lecturas") {
+        Text(
+            text = "${readings.size} lecturas descargadas en esta sesión.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                modifier = Modifier.weight(1f),
+                onClick = {
+                    val now = nowMs()
+                    exporter.shareText(
+                        content = readingsToCsv(readings),
+                        fileName = exportFileName(station.bleId, "csv", now),
+                        mimeType = CSV_MIME,
+                    )
+                },
+                enabled = readings.isNotEmpty(),
+            ) { Text("Exportar CSV") }
+            OutlinedButton(
+                modifier = Modifier.weight(1f),
+                onClick = {
+                    val now = nowMs()
+                    exporter.shareText(
+                        content = readingsToJson(readings),
+                        fileName = exportFileName(station.bleId, "json", now),
+                        mimeType = JSON_MIME,
+                    )
+                },
+                enabled = readings.isNotEmpty(),
+            ) { Text("Exportar JSON") }
+        }
     }
 }
 
