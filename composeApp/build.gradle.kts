@@ -39,6 +39,10 @@ kotlin {
         iosTarget.binaries.framework {
             baseName = "ComposeApp"
             isStatic = true
+            // SQLDelight's NativeSqliteDriver pulls in co.touchlab:sqliter,
+            // which expects libsqlite3 to be linked at framework-build time.
+            // Xcode otherwise fails with "Undefined symbol _sqlite3_bind_*".
+            linkerOpts.add("-lsqlite3")
         }
     }
     
