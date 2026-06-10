@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -29,6 +30,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,9 +38,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.astralink.terralink.ble.BleError
+import com.astralink.terralink.ble.protocol.InferenceDoneMsg
 import com.astralink.terralink.ble.protocol.StatusMsg
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.ble.session.SaviaSession
+import kotlinx.coroutines.launch
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.StationsRepository
 import com.astralink.terralink.ui.components.BackIconButton
@@ -59,6 +63,7 @@ fun DeviceScreen(
     session: SaviaSession,
     onUpdateFirmware: (ActiveSession) -> Unit,
     onSyncData: (ActiveSession) -> Unit,
+    onViewPredictions: (ActiveSession) -> Unit,
     onBack: () -> Unit,
 ) {
     var state by remember { mutableStateOf<ConnState>(ConnState.Connecting) }
@@ -98,9 +103,11 @@ fun DeviceScreen(
                 is ConnState.Failed -> FailedPanel(s.message, onRetry = { retryKey++ })
                 is ConnState.Ready -> ReadyPanel(
                     station = currentStation,
+                    session = s.session,
                     status = s.status,
                     onUpdateFirmware = { onUpdateFirmware(s.session) },
                     onSyncData = { onSyncData(s.session) },
+                    onViewPredictions = { onViewPredictions(s.session) },
                 )
             }
         }
@@ -146,13 +153,32 @@ private fun FailedPanel(message: String, onRetry: () -> Unit) {
     }
 }
 
+private sealed class InferUiState {
+    data object Idle : InferUiState()
+    data object Running : InferUiState()
+    data class Done(val result: InferenceDoneMsg) : InferUiState()
+    data class Failed(val message: String) : InferUiState()
+}
+
 @Composable
 private fun ReadyPanel(
     station: SavedStation,
+    session: ActiveSession,
     status: StatusMsg,
     onUpdateFirmware: () -> Unit,
     onSyncData: () -> Unit,
+    onViewPredictions: () -> Unit,
 ) {
+    val scope = rememberCoroutineScope()
+
+    // How many readings the station currently holds (mostly mock data today).
+    var readingCount by remember(session) { mutableStateOf<Long?>(null) }
+    LaunchedEffect(session) {
+        readingCount = runCatching { session.requestRawCount() }.getOrNull()
+    }
+
+    var infer by remember(session) { mutableStateOf<InferUiState>(InferUiState.Idle) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -160,15 +186,77 @@ private fun ReadyPanel(
             .padding(horizontal = 16.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        DeviceStatusCard(station = station, status = status)
-        TileGrid(onUpdateFirmware = onUpdateFirmware, onSyncData = onSyncData)
+        DeviceStatusCard(station = station, status = status, readingCount = readingCount)
+        TileGrid(
+            onUpdateFirmware = onUpdateFirmware,
+            onSyncData = onSyncData,
+            inferring = infer is InferUiState.Running,
+            onForceInference = {
+                infer = InferUiState.Running
+                scope.launch {
+                    infer = try {
+                        InferUiState.Done(session.requestInference())
+                    } catch (e: Throwable) {
+                        InferUiState.Failed(e.message ?: "no se pudo forzar la inferencia")
+                    }
+                }
+            },
+            onViewPredictions = onViewPredictions,
+        )
     }
+
+    when (val i = infer) {
+        is InferUiState.Done -> InferResultDialog(
+            result = i.result,
+            onViewPredictions = {
+                infer = InferUiState.Idle
+                onViewPredictions()
+            },
+            onDismiss = { infer = InferUiState.Idle },
+        )
+        is InferUiState.Failed -> AlertDialog(
+            onDismissRequest = { infer = InferUiState.Idle },
+            confirmButton = { TextButton(onClick = { infer = InferUiState.Idle }) { Text("Cerrar") } },
+            title = { Text("Inferencia fallida") },
+            text = { Text(i.message) },
+        )
+        else -> {}
+    }
+}
+
+@Composable
+private fun InferResultDialog(
+    result: InferenceDoneMsg,
+    onViewPredictions: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    if (!result.ok) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            confirmButton = { TextButton(onClick = onDismiss) { Text("Cerrar") } },
+            title = { Text("Inferencia no disponible") },
+            text = { Text(result.msg ?: "La estación no pudo completar la inferencia.") },
+        )
+        return
+    }
+    val recommendation = if (result.rec == 1) "Regar mañana" else "No regar"
+    val hs30 = result.hs30Min?.let { "HS30 mínimo previsto: ${(it * 100).toInt() / 100.0}" } ?: ""
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = onViewPredictions) { Text("Ver predicciones") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cerrar") } },
+        title = { Text("Recomendación: $recommendation") },
+        text = { Text(hs30) },
+    )
 }
 
 @Composable
 private fun TileGrid(
     onUpdateFirmware: () -> Unit,
     onSyncData: () -> Unit,
+    inferring: Boolean,
+    onForceInference: () -> Unit,
+    onViewPredictions: () -> Unit,
 ) {
     // 2-column manual grid -- LazyVerticalGrid would be overkill for 4 items
     // and we want both rows always visible inside the parent scroll.
@@ -191,19 +279,18 @@ private fun TileGrid(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             PremiumTile(
-                title = "Diagnóstico",
-                caption = "Próximamente",
-                glyph = "ℹ",
-                onClick = {},
-                enabled = false,
+                title = "Forzar inferencia",
+                caption = if (inferring) "Ejecutando en la estación…" else "Ejecutar el modelo ahora",
+                glyph = "⚡",
+                onClick = onForceInference,
+                enabled = !inferring,
                 modifier = Modifier.weight(1f),
             )
             PremiumTile(
-                title = "Configurar sensores",
-                caption = "Próximamente",
-                glyph = "⚙",
-                onClick = {},
-                enabled = false,
+                title = "Predicciones",
+                caption = "Ver la salida del modelo",
+                glyph = "📈",
+                onClick = onViewPredictions,
                 modifier = Modifier.weight(1f),
             )
         }
@@ -211,7 +298,7 @@ private fun TileGrid(
 }
 
 @Composable
-private fun DeviceStatusCard(station: SavedStation, status: StatusMsg) {
+private fun DeviceStatusCard(station: SavedStation, status: StatusMsg, readingCount: Long?) {
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
@@ -244,6 +331,11 @@ private fun DeviceStatusCard(station: SavedStation, status: StatusMsg) {
             InfoRow(label = "Firmware", value = "savia ${status.fw}")
             Spacer(Modifier.height(8.dp))
             InfoRow(label = "Uptime", value = formatUptime(status.uptimeS))
+            Spacer(Modifier.height(8.dp))
+            InfoRow(
+                label = "Lecturas en la estación",
+                value = readingCount?.let { "$it" } ?: "…",
+            )
             Spacer(Modifier.height(8.dp))
             InfoRow(
                 label = "Último sync",

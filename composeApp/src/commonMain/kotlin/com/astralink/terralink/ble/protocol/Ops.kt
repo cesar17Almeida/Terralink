@@ -13,9 +13,11 @@ object Op {
     // data_request write
     const val GET = "get"
     const val COUNT = "count"
+    const val INFER = "infer"            // force an ML inference cycle now
 
     // data_response notify chunks
     const val CHUNK = "chunk"
+    const val INFER_DONE = "infer_done"  // forced-inference result {ok, rec?, hs30_min?, msg?}
 
     // blob_control (client -> server)
     const val BLOB_START = "start"

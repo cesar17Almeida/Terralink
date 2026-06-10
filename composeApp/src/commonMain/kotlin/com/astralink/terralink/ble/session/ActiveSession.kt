@@ -20,6 +20,8 @@ import com.astralink.terralink.ble.protocol.DataChunkMsg
 import com.astralink.terralink.ble.protocol.DataCountRequestMsg
 import com.astralink.terralink.ble.protocol.DataKind
 import com.astralink.terralink.ble.protocol.DataRequestMsg
+import com.astralink.terralink.ble.protocol.InferenceDoneMsg
+import com.astralink.terralink.ble.protocol.InferenceRequestMsg
 import com.astralink.terralink.ble.protocol.Op
 import com.astralink.terralink.ble.protocol.Prediction
 import com.astralink.terralink.ble.protocol.Reading
@@ -50,6 +52,10 @@ private const val L2CAP_CHUNK_BYTES = 4096
 // no chunks ever arrive, the collector flow waits forever and the UI
 // stays "Sincronizando..." indefinitely.
 private const val DATA_REQUEST_TIMEOUT_MS = 15_000L
+
+// Forcing inference runs the LSTM + RF on the Pi (a few seconds on a Zero
+// 2W); give it more headroom than a plain query before giving up.
+private const val INFER_TIMEOUT_MS = 30_000L
 
 // How long we wait for the Pi to respond to a blob_control start with
 // the PSM (or an error). 15 s is generous -- the Pi only needs to bind
@@ -144,6 +150,31 @@ class ActiveSession internal constructor(
             collector.await()
             val payload = chunkedDecode(collected)
             SaviaCbor.decodeFromByteArray<CountMsg>(payload).count
+        }
+    }
+
+    /**
+     * Force an ML inference cycle on the Pi now. The station runs LSTM + RF,
+     * persists the prediction, and replies with the summary (recommendation +
+     * forecast minimum). Fetch the full curve afterwards with
+     * requestPredictions(). Mirrors the requestRawCount write+collect pattern.
+     */
+    @OptIn(ExperimentalSerializationApi::class)
+    suspend fun requestInference(): InferenceDoneMsg = withTimeout(INFER_TIMEOUT_MS) {
+        coroutineScope {
+            val collected = mutableListOf<ByteArray>()
+            val collector = async {
+                dataResponseFlow
+                    .takeWhile { raw ->
+                        collected.add(raw)
+                        !decode<DataChunkMsg>(raw).eof
+                    }
+                    .collect {}
+            }
+            connection.write(CHR_DATA_REQUEST_UUID, encode(InferenceRequestMsg()))
+            collector.await()
+            val payload = chunkedDecode(collected)
+            SaviaCbor.decodeFromByteArray<InferenceDoneMsg>(payload)
         }
     }
 

@@ -12,6 +12,7 @@ import com.astralink.terralink.ble.session.SaviaSession
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.StationsRepository
 import com.astralink.terralink.ui.DeviceScreen
+import com.astralink.terralink.ui.PredictionsScreen
 import com.astralink.terralink.ui.ScanScreen
 import com.astralink.terralink.ui.SplashScreen
 import com.astralink.terralink.ui.StationsListScreen
@@ -26,6 +27,7 @@ private sealed interface Screen {
     data class Device(val station: SavedStation) : Screen
     data class UpdateFirmware(val station: SavedStation) : Screen
     data class Sync(val station: SavedStation) : Screen
+    data class Predictions(val station: SavedStation) : Screen
 }
 
 @Composable
@@ -79,6 +81,10 @@ fun App() {
                     activeSession = active
                     screen = Screen.Sync(current.station)
                 },
+                onViewPredictions = { active ->
+                    activeSession = active
+                    screen = Screen.Predictions(current.station)
+                },
                 onBack = {
                     activeSession = null
                     screen = Screen.StationsList
@@ -106,6 +112,19 @@ fun App() {
                     screen = Screen.Device(current.station)
                 } else {
                     SyncScreen(
+                        station = current.station,
+                        active = active,
+                        onBack = { screen = Screen.Device(current.station) },
+                    )
+                }
+            }
+
+            is Screen.Predictions -> {
+                val active = activeSession
+                if (active == null) {
+                    screen = Screen.Device(current.station)
+                } else {
+                    PredictionsScreen(
                         station = current.station,
                         active = active,
                         onBack = { screen = Screen.Device(current.station) },

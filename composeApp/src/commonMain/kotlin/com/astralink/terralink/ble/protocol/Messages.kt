@@ -71,6 +71,34 @@ data class DataCountRequestMsg(
 @Serializable
 data class CountMsg(val count: Long)
 
+/**
+ * Force an inference cycle now ("force inference" button). Written to
+ * CHR_DATA_REQUEST_UUID; the Pi runs LSTM + RF and replies on data_response
+ * with a single chunked InferenceDoneMsg.
+ */
+@Serializable
+data class InferenceRequestMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String = Op.INFER,
+)
+
+/**
+ * Result of a forced inference. On success: ok=true, rec (0 healthy / 1
+ * irrigate) and hs30_min (the forecast minimum). On failure: ok=false + msg.
+ * Predictions themselves are persisted on the Pi; fetch them with
+ * requestPredictions() to draw the curve.
+ */
+@Serializable
+data class InferenceDoneMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String = Op.INFER_DONE,
+    val ok: Boolean,
+    val rec: Int? = null,
+    @SerialName("hs30_min")
+    val hs30Min: Double? = null,
+    val msg: String? = null,
+)
+
 // --- data_response (notify chunks on CHR_DATA_RESPONSE_UUID) ----------------
 
 @OptIn(ExperimentalSerializationApi::class)
