@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -28,6 +29,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -48,7 +50,9 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.BleError
 import com.astralink.terralink.ble.protocol.Reading
@@ -111,7 +115,8 @@ private fun SyncPhase.isActive(): Boolean = this is SyncPhase.SyncingTime ||
 
 private enum class KindFilter(val label: String, val sensorKind: String) {
     Moisture("Humedad", "soil_moisture"),
-    Temperature("Temperatura", "soil_temperature"),
+    AirTemp("Temp. aire", "air_temperature"),   // TA (la del LSTM)
+    SoilTemp("Temp. suelo", "soil_temperature"),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -126,6 +131,7 @@ fun SyncScreen(
     var customToMs by remember { mutableStateOf<Long?>(null) }
     var phase by remember { mutableStateOf<SyncPhase>(SyncPhase.Idle) }
     var kindFilter by remember { mutableStateOf(KindFilter.Moisture) }
+    var tablePage by remember { mutableStateOf(0) }
     var activeJob by remember { mutableStateOf<Job?>(null) }
     var showCancelDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -240,11 +246,18 @@ fun SyncScreen(
             val done = phase as? SyncPhase.Done
             if (done != null) {
                 SectionCard(title = "Visualización") {
-                    KindFilterRow(selected = kindFilter, onChange = { kindFilter = it })
+                    KindFilterRow(selected = kindFilter, onChange = { kindFilter = it; tablePage = 0 })
                     Spacer(Modifier.height(12.dp))
                     LineChart(
                         series = readingsToSeries(done.readings, kindFilter),
                         yLabel = if (kindFilter == KindFilter.Moisture) "%" else "°C",
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    DataTable(
+                        readings = done.readings,
+                        filter = kindFilter,
+                        page = tablePage,
+                        onPageChange = { tablePage = it },
                     )
                 }
 
@@ -617,16 +630,149 @@ private fun KindFilterRow(selected: KindFilter, onChange: (KindFilter) -> Unit) 
     }
 }
 
+// --- Paginated data table ---------------------------------------------------
+// The screen is inside a verticalScroll, so a LazyColumn would crash on the
+// infinite-height constraint; pagination lets us render only the current page's
+// rows as plain Rows, which is exactly what a table viewer needs anyway.
+
+private const val TABLE_PAGE_SIZE = 12
+
+@Composable
+private fun DataTable(
+    readings: List<Reading>,
+    filter: KindFilter,
+    page: Int,
+    onPageChange: (Int) -> Unit,
+) {
+    val rows = remember(readings, filter) {
+        readings.filter { it.kind == filter.sensorKind }.sortedByDescending { it.tsMs }
+    }
+    if (rows.isEmpty()) {
+        Text(
+            "Sin lecturas para esta serie.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        return
+    }
+    val pageCount = (rows.size + TABLE_PAGE_SIZE - 1) / TABLE_PAGE_SIZE
+    val safePage = page.coerceIn(0, pageCount - 1)
+    val start = safePage * TABLE_PAGE_SIZE
+    val pageRows = rows.subList(start, minOf(start + TABLE_PAGE_SIZE, rows.size))
+    val depthHeader = if (filter == KindFilter.AirTemp) "Sensor" else "Prof."
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+            TableCell("Fecha (UTC)", 0.46f, header = true)
+            TableCell(depthHeader, 0.27f, header = true)
+            TableCell("Valor", 0.27f, header = true, end = true)
+        }
+        HorizontalDivider()
+        pageRows.forEach { r ->
+            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                TableCell(formatDateTime(r.tsMs), 0.46f)
+                TableCell(rowKindLabel(r, filter), 0.27f)
+                TableCell(formatValue(r, filter), 0.27f, end = true)
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(onClick = { onPageChange(safePage - 1) }, enabled = safePage > 0) {
+                Text("‹ Anterior")
+            }
+            Text(
+                "Página ${safePage + 1} / $pageCount · ${rows.size} filas",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            TextButton(onClick = { onPageChange(safePage + 1) }, enabled = safePage < pageCount - 1) {
+                Text("Siguiente ›")
+            }
+        }
+    }
+}
+
+@Composable
+private fun RowScope.TableCell(text: String, weight: Float, header: Boolean = false, end: Boolean = false) {
+    Text(
+        text = text,
+        modifier = Modifier.weight(weight),
+        style = MaterialTheme.typography.labelSmall,
+        fontFamily = if (header) FontFamily.Default else FontFamily.Monospace,
+        fontWeight = if (header) FontWeight.SemiBold else FontWeight.Normal,
+        textAlign = if (end) TextAlign.End else TextAlign.Start,
+        color = if (header) MaterialTheme.colorScheme.onSurfaceVariant
+                else MaterialTheme.colorScheme.onSurface,
+    )
+}
+
+private fun rowKindLabel(r: Reading, filter: KindFilter): String = when (filter) {
+    KindFilter.AirTemp -> "aire"
+    else -> "${r.depthCm ?: 0} cm"
+}
+
+private fun formatValue(r: Reading, filter: KindFilter): String =
+    if (filter == KindFilter.Moisture) fmtDecimals(r.value, 2) else "${fmtDecimals(r.value, 1)}°"
+
+// Fixed-decimals formatter without depending on platform String.format.
+private fun fmtDecimals(v: Double, places: Int): String {
+    var mul = 1L
+    repeat(places) { mul *= 10 }
+    val neg = v < 0
+    val scaled = kotlin.math.round(kotlin.math.abs(v) * mul).toLong()
+    val whole = scaled / mul
+    val frac = scaled % mul
+    val sign = if (neg && (whole != 0L || frac != 0L)) "-" else ""
+    return if (places == 0) "$sign$whole"
+           else "$sign$whole.${frac.toString().padStart(places, '0')}"
+}
+
+private const val MS_PER_DAY_TABLE = 86_400_000L
+
+// epoch ms (UTC) -> "MM-DD HH:mm" via the Howard Hinnant civil-from-days algorithm.
+private fun formatDateTime(ms: Long): String {
+    val epochDay = ms / MS_PER_DAY_TABLE
+    val msOfDay = ms % MS_PER_DAY_TABLE
+    val hh = (msOfDay / 3_600_000L).toInt()
+    val mm = ((msOfDay / 60_000L) % 60).toInt()
+    val z = epochDay + 719_468
+    val era = if (z >= 0) z / 146_097 else (z - 146_096) / 146_097
+    val doe = z - era * 146_097
+    val yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365
+    val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    val mp = (5 * doy + 2) / 153
+    val d = doy - (153 * mp + 2) / 5 + 1
+    val mon = if (mp < 10) mp + 3 else mp - 9
+    fun p2(n: Long) = n.toString().padStart(2, '0')
+    return "${p2(mon)}-${p2(d)} ${p2(hh.toLong())}:${p2(mm.toLong())}"
+}
+
 private fun readingsToSeries(
     readings: List<Reading>,
     filter: KindFilter,
 ): List<ChartSeries> {
     val palette = when (filter) {
         KindFilter.Moisture -> MoistureDepthColors
-        KindFilter.Temperature -> TemperatureDepthColors
+        KindFilter.AirTemp, KindFilter.SoilTemp -> TemperatureDepthColors
     }
-    val filtered = readings.filter { it.kind == filter.sensorKind && it.depthCm != null }
-    val grouped: Map<Int, List<Reading>> = filtered.groupBy { it.depthCm!! }
+    val filtered = readings.filter { it.kind == filter.sensorKind }
+
+    // Air temperature has no depth -> a single series.
+    if (filter == KindFilter.AirTemp) {
+        if (filtered.isEmpty()) return emptyList()
+        return listOf(ChartSeries(
+            label = "Aire",
+            color = palette.first(),
+            points = filtered.sortedBy { it.tsMs }.map { it.tsMs to it.value.toFloat() },
+        ))
+    }
+
+    val grouped: Map<Int, List<Reading>> = filtered.filter { it.depthCm != null }.groupBy { it.depthCm!! }
     val sortedDepths = grouped.keys.sorted()
     return sortedDepths.mapIndexed { idx, depth ->
         val rows = grouped[depth].orEmpty()

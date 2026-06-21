@@ -10,28 +10,37 @@ import com.astralink.terralink.ble.protocol.BlobControlEnvelope
 import com.astralink.terralink.ble.protocol.BlobKind
 import com.astralink.terralink.ble.protocol.BlobStartMsg
 import com.astralink.terralink.ble.protocol.CHR_BLOB_CONTROL_UUID
+import com.astralink.terralink.ble.protocol.AuthChgMsg
+import com.astralink.terralink.ble.protocol.AuthMsg
+import com.astralink.terralink.ble.protocol.AuthSetMsg
+import com.astralink.terralink.ble.protocol.AuthStateMsg
+import com.astralink.terralink.ble.protocol.CHR_AUTH_UUID
+import com.astralink.terralink.ble.protocol.CHR_CONFIG_UUID
+import com.astralink.terralink.ble.protocol.ClearRequestMsg
 import com.astralink.terralink.ble.protocol.CHR_DATA_REQUEST_UUID
+import com.astralink.terralink.ble.util.authProof
+import com.astralink.terralink.ble.util.passwordKey
 import com.astralink.terralink.ble.protocol.CHR_DATA_RESPONSE_UUID
 import com.astralink.terralink.ble.protocol.CHR_STATUS_UUID
 import com.astralink.terralink.ble.protocol.CHR_TIME_SYNC_UUID
-import com.astralink.terralink.ble.protocol.CHR_WEATHER_UUID
+import com.astralink.terralink.ble.protocol.ConfigPatchMsg
+import com.astralink.terralink.ble.protocol.ConfigSnapshotMsg
 import com.astralink.terralink.ble.protocol.CountMsg
 import com.astralink.terralink.ble.protocol.DataChunkMsg
 import com.astralink.terralink.ble.protocol.DataCountRequestMsg
 import com.astralink.terralink.ble.protocol.DataKind
 import com.astralink.terralink.ble.protocol.DataRequestMsg
-import com.astralink.terralink.ble.protocol.InferenceDoneMsg
-import com.astralink.terralink.ble.protocol.InferenceRequestMsg
+import com.astralink.terralink.ble.protocol.IngestAckMsg
+import com.astralink.terralink.ble.protocol.IngestMsg
+import com.astralink.terralink.ble.protocol.IngestPoint
+import com.astralink.terralink.ble.protocol.MockRequestMsg
 import com.astralink.terralink.ble.protocol.Op
 import com.astralink.terralink.ble.protocol.Prediction
 import com.astralink.terralink.ble.protocol.Reading
 import com.astralink.terralink.ble.protocol.StatusMsg
 import com.astralink.terralink.ble.protocol.TimeSyncMsg
-import com.astralink.terralink.ble.protocol.WeatherData
-import com.astralink.terralink.ble.protocol.WeatherMsg
 import com.astralink.terralink.ble.util.sha256
 import kotlinx.coroutines.async
-import kotlinx.coroutines.channels.ProducerScope
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
@@ -39,6 +48,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.takeWhile
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
@@ -47,15 +58,16 @@ import kotlinx.serialization.decodeFromByteArray
 
 private const val L2CAP_CHUNK_BYTES = 4096
 
+// Each ingest point is ~69 B of CBOR; 2/write keeps a batch (~158 B + envelope)
+// comfortably under the negotiated ATT MTU (~244 B) so no single write needs ATT
+// long-write support, even at the smallest realistic MTU.
+private const val INGEST_MAX_POINTS_PER_WRITE = 2
+
 // Hard cap on how long we wait for the Pi to finish streaming chunks
 // for one data_request. Without this, if the request is rejected and
 // no chunks ever arrive, the collector flow waits forever and the UI
 // stays "Sincronizando..." indefinitely.
 private const val DATA_REQUEST_TIMEOUT_MS = 15_000L
-
-// Forcing inference runs the LSTM + RF on the Pi (a few seconds on a Zero
-// 2W); give it more headroom than a plain query before giving up.
-private const val INFER_TIMEOUT_MS = 30_000L
 
 // How long we wait for the Pi to respond to a blob_control start with
 // the PSM (or an error). 15 s is generous -- the Pi only needs to bind
@@ -80,6 +92,12 @@ class ActiveSession internal constructor(
     // notification can't fire before we subscribe.
     private val dataResponseFlow: Flow<ByteArray> =
         connection.notifications(CHR_DATA_RESPONSE_UUID)
+
+    // The firmware handles ONE data_request at a time and every helper below
+    // collects the SAME shared data_response notify flow; two overlapping
+    // request/collect cycles would see each other's chunks and corrupt the
+    // reassembly. Serialize them so only one is in flight at a time.
+    private val requestMutex = Mutex()
     private val blobControlFlow: Flow<ByteArray> =
         connection.notifications(CHR_BLOB_CONTROL_UUID)
 
@@ -88,12 +106,118 @@ class ActiveSession internal constructor(
     suspend fun readStatus(): StatusMsg =
         decode(connection.read(CHR_STATUS_UUID))
 
+    // --- auth (challenge-response) -----------------------------------------
+
+    /** Read the auth state: whether a password is set + whether we're authenticated, + the nonce. */
+    suspend fun readAuthState(): AuthStateMsg =
+        decode(connection.read(CHR_AUTH_UUID))
+
+    /** Set the password the first time (only works while unprovisioned). */
+    suspend fun setPassword(password: String) {
+        connection.write(CHR_AUTH_UUID, encode(AuthSetMsg(key = passwordKey(password))))
+    }
+
+    /** Prove the password for this connection. Returns true if it unlocked the station. */
+    suspend fun authenticate(password: String): Boolean {
+        val state = readAuthState()
+        val mac = authProof(passwordKey(password), state.nonce)
+        connection.write(CHR_AUTH_UUID, encode(AuthMsg(mac = mac)))
+        return readAuthState().authed
+    }
+
+    /** Change the password (needs the current one). Returns true on success. */
+    suspend fun changePassword(old: String, new: String): Boolean {
+        val state = readAuthState()
+        val oldMac = authProof(passwordKey(old), state.nonce)
+        connection.write(CHR_AUTH_UUID, encode(AuthChgMsg(oldMac = oldMac, key = passwordKey(new))))
+        return readAuthState().authed
+    }
+
     suspend fun setTime(epochMs: Long) {
         connection.write(CHR_TIME_SYNC_UUID, encode(TimeSyncMsg(ms = epochMs)))
     }
 
-    suspend fun setWeather(data: WeatherData) {
-        connection.write(CHR_WEATHER_UUID, encode(WeatherMsg(data = data)))
+    // One serialized data_request -> data_response cycle: subscribe to the notify
+    // flow, run `write`, gather chunks until eof, return them. The mutex keeps any
+    // two cycles from overlapping (they share the single notify flow); the collector
+    // is launched before `write` so the first chunk can't be missed.
+    private suspend fun runDataRequest(write: suspend () -> Unit): List<ByteArray> =
+        requestMutex.withLock {
+            withTimeout(DATA_REQUEST_TIMEOUT_MS) {
+                coroutineScope {
+                    val collected = mutableListOf<ByteArray>()
+                    val collector = async {
+                        dataResponseFlow.takeWhile { raw ->
+                            collected.add(raw); !decode<DataChunkMsg>(raw).eof
+                        }.collect {}
+                    }
+                    write()
+                    collector.await()
+                    collected
+                }
+            }
+        }
+
+    /**
+     * Upsert timestamped points on the station (create-or-update by ts/port/kind/
+     * depth). This is how the TA forecast (kind=air_temperature, future ts) and
+     * recent measured points that feed the LSTM are pushed -- one point or many.
+     * Each point is ~69 B on the wire, so the list is split into MTU-sized writes
+     * and the per-write acks are summed into one IngestAckMsg {created, updated}.
+     */
+    @OptIn(ExperimentalSerializationApi::class)
+    suspend fun ingest(points: List<IngestPoint>): IngestAckMsg {
+        if (points.isEmpty()) return IngestAckMsg(created = 0, updated = 0)
+        var created = 0
+        var updated = 0
+        for (batch in points.chunked(INGEST_MAX_POINTS_PER_WRITE)) {
+            val ack = ingestBatch(batch)
+            created += ack.created
+            updated += ack.updated
+        }
+        return IngestAckMsg(created = created, updated = updated)
+    }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    private suspend fun ingestBatch(batch: List<IngestPoint>): IngestAckMsg {
+        val chunks = runDataRequest {
+            connection.write(CHR_DATA_REQUEST_UUID, encode(IngestMsg(data = batch)))
+        }
+        return SaviaCbor.decodeFromByteArray<IngestAckMsg>(chunkedDecode(chunks))
+    }
+
+    // --- config (device card + deep sleep + sensor pins) -------------------
+
+    /** Read the full config snapshot (device card, sleep time, sensors, GPIO map). */
+    suspend fun readConfig(): ConfigSnapshotMsg =
+        decode(connection.read(CHR_CONFIG_UUID))
+
+    /**
+     * Apply a config patch (only the changed fields) and read back the resulting
+     * snapshot, so the caller can confirm the station actually applied it.
+     */
+    suspend fun writeConfig(patch: ConfigPatchMsg): ConfigSnapshotMsg {
+        connection.write(CHR_CONFIG_UUID, encode(patch))
+        return readConfig()
+    }
+
+    /**
+     * Dev: inject mock data. kind = "hs10" | "hs30" | "ta" injects one reading;
+     * kind = "pred" makes the station publish a synthetic 24 h HS30 forecast so
+     * the dashboard can be exercised before the off-device LSTM emits a real one.
+     */
+    suspend fun mockReading(kind: String) {
+        runDataRequest { connection.write(CHR_DATA_REQUEST_UUID, encode(MockRequestMsg(kind = kind))) }
+    }
+
+    /** Recent firmware log lines (oldest first). Served chunked like any data_request. */
+    @OptIn(ExperimentalSerializationApi::class)
+    suspend fun requestLogs(): List<String> =
+        SaviaCbor.decodeFromByteArray<List<String>>(requestData(DataKind.LOGS))
+
+    /** Dev: wipe all stored data on the station. */
+    suspend fun clearData() {
+        runDataRequest { connection.write(CHR_DATA_REQUEST_UUID, encode(ClearRequestMsg())) }
     }
 
     // --- Data query --------------------------------------------------------
@@ -131,58 +255,22 @@ class ActiveSession internal constructor(
     suspend fun requestRawCount(
         fromMs: Long? = null,
         toMs: Long? = null,
-    ): Long = withTimeout(DATA_REQUEST_TIMEOUT_MS) {
-        coroutineScope {
-            val collected = mutableListOf<ByteArray>()
-            val collector = async {
-                dataResponseFlow
-                    .takeWhile { raw ->
-                        collected.add(raw)
-                        val msg = decode<DataChunkMsg>(raw)
-                        !msg.eof
-                    }
-                    .collect {}
-            }
+    ): Long {
+        val chunks = runDataRequest {
             connection.write(
                 CHR_DATA_REQUEST_UUID,
                 encode(DataCountRequestMsg(kind = DataKind.RAW, from = fromMs, to = toMs)),
             )
-            collector.await()
-            val payload = chunkedDecode(collected)
-            SaviaCbor.decodeFromByteArray<CountMsg>(payload).count
         }
-    }
-
-    /**
-     * Force an ML inference cycle on the Pi now. The station runs LSTM + RF,
-     * persists the prediction, and replies with the summary (recommendation +
-     * forecast minimum). Fetch the full curve afterwards with
-     * requestPredictions(). Mirrors the requestRawCount write+collect pattern.
-     */
-    @OptIn(ExperimentalSerializationApi::class)
-    suspend fun requestInference(): InferenceDoneMsg = withTimeout(INFER_TIMEOUT_MS) {
-        coroutineScope {
-            val collected = mutableListOf<ByteArray>()
-            val collector = async {
-                dataResponseFlow
-                    .takeWhile { raw ->
-                        collected.add(raw)
-                        !decode<DataChunkMsg>(raw).eof
-                    }
-                    .collect {}
-            }
-            connection.write(CHR_DATA_REQUEST_UUID, encode(InferenceRequestMsg()))
-            collector.await()
-            val payload = chunkedDecode(collected)
-            SaviaCbor.decodeFromByteArray<InferenceDoneMsg>(payload)
-        }
+        return SaviaCbor.decodeFromByteArray<CountMsg>(chunkedDecode(chunks)).count
     }
 
     /**
      * Streaming variant of requestRawReadings: emits DownloadProgress.Chunk
      * for every notify chunk the Pi sends (so the UI can show a real
      * percentage) and a final DownloadProgress.Complete with the decoded
-     * List<Reading>. Wraps the same underlying GATT write+notify flow.
+     * List<Reading>. Holds the request mutex for the whole download so no other
+     * data_request interleaves on the shared notify flow.
      *
      * Callers should still wrap the collect in withTimeout if they want a
      * hard cap (the synchronous requestData() above already does that for
@@ -194,26 +282,28 @@ class ActiveSession internal constructor(
         toMs: Long? = null,
         limit: Int? = null,
     ): Flow<DownloadProgress> = channelFlow {
-        val collected = mutableListOf<ByteArray>()
-        val collector = launch {
-            dataResponseFlow
-                .takeWhile { raw ->
-                    collected.add(raw)
-                    val msg = decode<DataChunkMsg>(raw)
-                    // Send a snapshot of progress so the UI can advance smoothly.
-                    trySend(DownloadProgress.Chunk(received = msg.s + 1, total = msg.t))
-                    !msg.eof
-                }
-                .collect {}
+        requestMutex.withLock {
+            val collected = mutableListOf<ByteArray>()
+            val collector = launch {
+                dataResponseFlow
+                    .takeWhile { raw ->
+                        collected.add(raw)
+                        val msg = decode<DataChunkMsg>(raw)
+                        // Send a snapshot of progress so the UI can advance smoothly.
+                        trySend(DownloadProgress.Chunk(received = msg.s + 1, total = msg.t))
+                        !msg.eof
+                    }
+                    .collect {}
+            }
+            connection.write(
+                CHR_DATA_REQUEST_UUID,
+                encode(DataRequestMsg(kind = DataKind.RAW, from = fromMs, to = toMs, limit = limit)),
+            )
+            collector.join()
+            val payload = chunkedDecode(collected)
+            val readings = SaviaCbor.decodeFromByteArray<List<Reading>>(payload)
+            send(DownloadProgress.Complete(readings))
         }
-        connection.write(
-            CHR_DATA_REQUEST_UUID,
-            encode(DataRequestMsg(kind = DataKind.RAW, from = fromMs, to = toMs, limit = limit)),
-        )
-        collector.join()
-        val payload = chunkedDecode(collected)
-        val readings = SaviaCbor.decodeFromByteArray<List<Reading>>(payload)
-        send(DownloadProgress.Complete(readings))
     }
 
     /**
@@ -227,28 +317,14 @@ class ActiveSession internal constructor(
         fromMs: Long? = null,
         toMs: Long? = null,
         limit: Int? = null,
-    ): ByteArray = withTimeout(DATA_REQUEST_TIMEOUT_MS) {
-        coroutineScope {
-            val collected = mutableListOf<ByteArray>()
-
-            // Subscribe before writing the request so we don't miss the first chunk.
-            val collector = async {
-                dataResponseFlow
-                    .takeWhile { raw ->
-                        collected.add(raw)
-                        val msg = decode<DataChunkMsg>(raw)
-                        !msg.eof
-                    }
-                    .collect {}
-            }
-
+    ): ByteArray {
+        val chunks = runDataRequest {
             connection.write(
                 CHR_DATA_REQUEST_UUID,
                 encode(DataRequestMsg(kind = kind, from = fromMs, to = toMs, limit = limit)),
             )
-            collector.await()
-            chunkedDecode(collected)
         }
+        return chunkedDecode(chunks)
     }
 
     @OptIn(ExperimentalSerializationApi::class)

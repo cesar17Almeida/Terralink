@@ -38,7 +38,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.astralink.terralink.ble.BleError
-import com.astralink.terralink.ble.protocol.InferenceDoneMsg
 import com.astralink.terralink.ble.protocol.StatusMsg
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.ble.session.SaviaSession
@@ -47,13 +46,23 @@ import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.StationsRepository
 import com.astralink.terralink.ui.components.BackIconButton
 import com.astralink.terralink.ui.components.ConnectionStatusChip
+import com.astralink.terralink.ui.components.PasswordField
 import com.astralink.terralink.ui.components.PremiumTile
 import com.astralink.terralink.util.nowMs
 
 private sealed class ConnState {
     data object Connecting : ConnState()
+    data class NeedsAuth(val active: ActiveSession) : ConnState()
     data class Ready(val session: ActiveSession, val status: StatusMsg) : ConnState()
     data class Failed(val message: String) : ConnState()
+}
+
+// setTime + readStatus once we're allowed (open or authenticated).
+private suspend fun readyFrom(active: ActiveSession): ConnState = try {
+    runCatching { active.setTime(nowMs()) }
+    ConnState.Ready(active, active.readStatus())
+} catch (e: Throwable) {
+    ConnState.Failed(e.message ?: e::class.simpleName ?: "unexpected error")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -61,23 +70,31 @@ private sealed class ConnState {
 fun DeviceScreen(
     station: SavedStation,
     session: SaviaSession,
-    onUpdateFirmware: (ActiveSession) -> Unit,
     onSyncData: (ActiveSession) -> Unit,
     onViewPredictions: (ActiveSession) -> Unit,
+    onConfigure: (ActiveSession) -> Unit,
     onBack: () -> Unit,
 ) {
     var state by remember { mutableStateOf<ConnState>(ConnState.Connecting) }
     var retryKey by remember { mutableStateOf(0) }
+    var authSubmitting by remember { mutableStateOf(false) }
+    var authError by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
 
     val stations by StationsRepository.stations.collectAsStateWithLifecycle()
     val currentStation = stations.firstOrNull { it.bleId == station.bleId } ?: station
 
     LaunchedEffect(currentStation.bleId, retryKey) {
         state = ConnState.Connecting
+        authError = null
         state = try {
             val active = session.connect(currentStation.bleId)
-            val status = active.readStatus()
-            ConnState.Ready(active, status)
+            // Tolerate a firmware/cache without the auth characteristic (older GATT
+            // or stale iOS cache): treat as open instead of failing the connection.
+            val auth = runCatching { active.readAuthState() }.getOrNull()
+            // Locked station: prompt for the password before doing anything else.
+            if (auth != null && auth.prov && !auth.authed) ConnState.NeedsAuth(active)
+            else readyFrom(active)
         } catch (e: BleError) {
             ConnState.Failed(e.message ?: e::class.simpleName ?: "connection failed")
         } catch (e: Throwable) {
@@ -91,9 +108,7 @@ fun DeviceScreen(
                 title = {
                     Text(text = currentStation.displayName, fontWeight = FontWeight.SemiBold)
                 },
-                navigationIcon = {
-                    TextButton(onClick = onBack) { Text("Atrás") }
-                },
+                navigationIcon = { BackIconButton(onClick = onBack) },
             )
         },
     ) { innerPadding ->
@@ -101,13 +116,27 @@ fun DeviceScreen(
             when (val s = state) {
                 ConnState.Connecting -> ConnectingPanel(currentStation)
                 is ConnState.Failed -> FailedPanel(s.message, onRetry = { retryKey++ })
+                is ConnState.NeedsAuth -> AuthPanel(
+                    stationName = currentStation.displayName,
+                    submitting = authSubmitting,
+                    error = authError,
+                    onSubmit = { pw ->
+                        authSubmitting = true
+                        authError = null
+                        scope.launch {
+                            val ok = runCatching { s.active.authenticate(pw) }.getOrDefault(false)
+                            if (ok) state = readyFrom(s.active)
+                            else { authError = "Contraseña incorrecta"; authSubmitting = false }
+                        }
+                    },
+                )
                 is ConnState.Ready -> ReadyPanel(
                     station = currentStation,
                     session = s.session,
                     status = s.status,
-                    onUpdateFirmware = { onUpdateFirmware(s.session) },
                     onSyncData = { onSyncData(s.session) },
                     onViewPredictions = { onViewPredictions(s.session) },
+                    onConfigure = { onConfigure(s.session) },
                 )
             }
         }
@@ -153,11 +182,43 @@ private fun FailedPanel(message: String, onRetry: () -> Unit) {
     }
 }
 
-private sealed class InferUiState {
-    data object Idle : InferUiState()
-    data object Running : InferUiState()
-    data class Done(val result: InferenceDoneMsg) : InferUiState()
-    data class Failed(val message: String) : InferUiState()
+@Composable
+private fun AuthPanel(
+    stationName: String,
+    submitting: Boolean,
+    error: String?,
+    onSubmit: (String) -> Unit,
+) {
+    var pw by remember { mutableStateOf("") }
+    Column(
+        modifier = Modifier.fillMaxSize().padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text("🔒 Estación protegida", style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(8.dp))
+        Text("Introduce la contraseña de $stationName",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(20.dp))
+        PasswordField(
+            value = pw,
+            onValueChange = { pw = it },
+            label = "Contraseña",
+            isError = error != null,
+            supportingText = { error?.let { Text(it, color = MaterialTheme.colorScheme.error) } },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(16.dp))
+        Button(
+            onClick = { onSubmit(pw) },
+            enabled = pw.isNotEmpty() && !submitting,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(if (submitting) "Comprobando…" else "Desbloquear")
+        }
+    }
 }
 
 @Composable
@@ -165,19 +226,15 @@ private fun ReadyPanel(
     station: SavedStation,
     session: ActiveSession,
     status: StatusMsg,
-    onUpdateFirmware: () -> Unit,
     onSyncData: () -> Unit,
     onViewPredictions: () -> Unit,
+    onConfigure: () -> Unit,
 ) {
-    val scope = rememberCoroutineScope()
-
     // How many readings the station currently holds (mostly mock data today).
     var readingCount by remember(session) { mutableStateOf<Long?>(null) }
     LaunchedEffect(session) {
         readingCount = runCatching { session.requestRawCount() }.getOrNull()
     }
-
-    var infer by remember(session) { mutableStateOf<InferUiState>(InferUiState.Idle) }
 
     Column(
         modifier = Modifier
@@ -188,112 +245,32 @@ private fun ReadyPanel(
     ) {
         DeviceStatusCard(station = station, status = status, readingCount = readingCount)
         TileGrid(
-            onUpdateFirmware = onUpdateFirmware,
             onSyncData = onSyncData,
-            inferring = infer is InferUiState.Running,
-            onForceInference = {
-                infer = InferUiState.Running
-                scope.launch {
-                    infer = try {
-                        InferUiState.Done(session.requestInference())
-                    } catch (e: Throwable) {
-                        InferUiState.Failed(e.message ?: "no se pudo forzar la inferencia")
-                    }
-                }
-            },
             onViewPredictions = onViewPredictions,
+            onConfigure = onConfigure,
         )
     }
-
-    when (val i = infer) {
-        is InferUiState.Done -> InferResultDialog(
-            result = i.result,
-            onViewPredictions = {
-                infer = InferUiState.Idle
-                onViewPredictions()
-            },
-            onDismiss = { infer = InferUiState.Idle },
-        )
-        is InferUiState.Failed -> AlertDialog(
-            onDismissRequest = { infer = InferUiState.Idle },
-            confirmButton = { TextButton(onClick = { infer = InferUiState.Idle }) { Text("Cerrar") } },
-            title = { Text("Inferencia fallida") },
-            text = { Text(i.message) },
-        )
-        else -> {}
-    }
-}
-
-@Composable
-private fun InferResultDialog(
-    result: InferenceDoneMsg,
-    onViewPredictions: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    if (!result.ok) {
-        AlertDialog(
-            onDismissRequest = onDismiss,
-            confirmButton = { TextButton(onClick = onDismiss) { Text("Cerrar") } },
-            title = { Text("Inferencia no disponible") },
-            text = { Text(result.msg ?: "La estación no pudo completar la inferencia.") },
-        )
-        return
-    }
-    val recommendation = if (result.rec == 1) "Regar mañana" else "No regar"
-    val hs30 = result.hs30Min?.let { "HS30 mínimo previsto: ${(it * 100).toInt() / 100.0}" } ?: ""
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        confirmButton = { TextButton(onClick = onViewPredictions) { Text("Ver predicciones") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cerrar") } },
-        title = { Text("Recomendación: $recommendation") },
-        text = { Text(hs30) },
-    )
 }
 
 @Composable
 private fun TileGrid(
-    onUpdateFirmware: () -> Unit,
     onSyncData: () -> Unit,
-    inferring: Boolean,
-    onForceInference: () -> Unit,
     onViewPredictions: () -> Unit,
+    onConfigure: () -> Unit,
 ) {
-    // 2-column manual grid -- LazyVerticalGrid would be overkill for 4 items
-    // and we want both rows always visible inside the parent scroll.
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            PremiumTile(
-                title = "Actualizar firmware",
-                caption = "Subir un .bin nuevo por BLE",
-                glyph = "⬆",
-                onClick = onUpdateFirmware,
-                modifier = Modifier.weight(1f),
-            )
-            PremiumTile(
-                title = "Sincronizar datos",
-                caption = "Descargar lecturas del sensor",
-                glyph = "↻",
-                onClick = onSyncData,
-                modifier = Modifier.weight(1f),
-            )
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            PremiumTile(
-                title = "Forzar inferencia",
-                caption = if (inferring) "Ejecutando en la estación…" else "Ejecutar el modelo ahora",
-                glyph = "⚡",
-                onClick = onForceInference,
-                enabled = !inferring,
-                modifier = Modifier.weight(1f),
-            )
-            PremiumTile(
-                title = "Predicciones",
-                caption = "Ver la salida del modelo",
-                glyph = "📈",
-                onClick = onViewPredictions,
-                modifier = Modifier.weight(1f),
-            )
-        }
+    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        PremiumTile(
+            title = "Sincronizar", caption = "Descargar datos", glyph = "↻",
+            onClick = onSyncData, modifier = Modifier.weight(1f),
+        )
+        PremiumTile(
+            title = "Predicciones", caption = "Salida del modelo", glyph = "📈",
+            onClick = onViewPredictions, modifier = Modifier.weight(1f),
+        )
+        PremiumTile(
+            title = "Configurar", caption = "Ajustes", glyph = "⚙",
+            onClick = onConfigure, modifier = Modifier.weight(1f),
+        )
     }
 }
 
@@ -304,7 +281,7 @@ private fun DeviceStatusCard(station: SavedStation, status: StatusMsg, readingCo
         shape = RoundedCornerShape(20.dp),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
     ) {
-        Column(modifier = Modifier.padding(20.dp)) {
+        Column(modifier = Modifier.padding(16.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -312,65 +289,24 @@ private fun DeviceStatusCard(station: SavedStation, status: StatusMsg, readingCo
             ) {
                 Text(
                     text = station.displayName,
-                    style = MaterialTheme.typography.titleLarge,
+                    style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
                 ConnectionStatusChip(connected = true)
             }
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(6.dp))
             Text(
-                text = station.bleId,
+                text = "fw ${status.fw} · " + (readingCount?.let { "$it lecturas" } ?: "… lecturas"),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-
-            Spacer(Modifier.height(16.dp))
-            HorizontalDivider()
-            Spacer(Modifier.height(16.dp))
-
-            InfoRow(label = "Firmware", value = "savia ${status.fw}")
-            Spacer(Modifier.height(8.dp))
-            InfoRow(label = "Uptime", value = formatUptime(status.uptimeS))
-            Spacer(Modifier.height(8.dp))
-            InfoRow(
-                label = "Lecturas en la estación",
-                value = readingCount?.let { "$it" } ?: "…",
-            )
-            Spacer(Modifier.height(8.dp))
-            InfoRow(
-                label = "Último sync",
-                value = station.lastSyncMs?.let { formatRelativeMs(it) } ?: "Sin sync",
+            Text(
+                text = "Último sync " + (station.lastSyncMs?.let { formatRelativeMs(it) } ?: "—"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
-}
-
-@Composable
-private fun InfoRow(label: String, value: String) {
-    Row(modifier = Modifier.fillMaxWidth()) {
-        Text(
-            text = label,
-            modifier = Modifier.weight(0.4f),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Text(
-            text = value,
-            modifier = Modifier.weight(0.6f),
-            style = MaterialTheme.typography.bodyMedium,
-        )
-    }
-}
-
-private fun formatUptime(seconds: Long): String {
-    val days = seconds / 86_400
-    val hours = (seconds % 86_400) / 3_600
-    val mins = (seconds % 3_600) / 60
-    return buildString {
-        if (days > 0) append("${days}d ")
-        if (hours > 0 || days > 0) append("${hours}h ")
-        append("${mins}m")
-    }.trim()
 }
 
 private fun formatRelativeMs(ms: Long): String {

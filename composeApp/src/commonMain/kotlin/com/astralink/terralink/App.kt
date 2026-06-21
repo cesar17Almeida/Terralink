@@ -11,7 +11,9 @@ import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.ble.session.SaviaSession
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.StationsRepository
+import com.astralink.terralink.ui.ConfigurationScreen
 import com.astralink.terralink.ui.DeviceScreen
+import com.astralink.terralink.ui.LogsScreen
 import com.astralink.terralink.ui.PredictionsScreen
 import com.astralink.terralink.ui.ScanScreen
 import com.astralink.terralink.ui.SplashScreen
@@ -28,6 +30,8 @@ private sealed interface Screen {
     data class UpdateFirmware(val station: SavedStation) : Screen
     data class Sync(val station: SavedStation) : Screen
     data class Predictions(val station: SavedStation) : Screen
+    data class Configuration(val station: SavedStation) : Screen
+    data class Logs(val station: SavedStation) : Screen
 }
 
 @Composable
@@ -73,10 +77,6 @@ fun App() {
             is Screen.Device -> DeviceScreen(
                 station = current.station,
                 session = session,
-                onUpdateFirmware = { active ->
-                    activeSession = active
-                    screen = Screen.UpdateFirmware(current.station)
-                },
                 onSyncData = { active ->
                     activeSession = active
                     screen = Screen.Sync(current.station)
@@ -84,6 +84,10 @@ fun App() {
                 onViewPredictions = { active ->
                     activeSession = active
                     screen = Screen.Predictions(current.station)
+                },
+                onConfigure = { active ->
+                    activeSession = active
+                    screen = Screen.Configuration(current.station)
                 },
                 onBack = {
                     activeSession = null
@@ -128,6 +132,33 @@ fun App() {
                         station = current.station,
                         active = active,
                         onBack = { screen = Screen.Device(current.station) },
+                    )
+                }
+            }
+
+            is Screen.Configuration -> {
+                val active = activeSession
+                if (active == null) {
+                    screen = Screen.Device(current.station)
+                } else {
+                    ConfigurationScreen(
+                        station = current.station,
+                        active = active,
+                        onViewLogs = { screen = Screen.Logs(current.station) },
+                        onBack = { screen = Screen.Device(current.station) },
+                    )
+                }
+            }
+
+            is Screen.Logs -> {
+                val active = activeSession
+                if (active == null) {
+                    screen = Screen.Device(current.station)
+                } else {
+                    LogsScreen(
+                        station = current.station,
+                        active = active,
+                        onBack = { screen = Screen.Configuration(current.station) },
                     )
                 }
             }

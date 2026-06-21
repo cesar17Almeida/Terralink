@@ -23,26 +23,9 @@ data class TimeSyncMsg(
     val ms: Long,
 )
 
-// --- weather (write to CHR_WEATHER_UUID) -------------------------------------
-
-@Serializable
-data class WeatherData(
-    val temp: Double? = null,
-    val humidity: Double? = null,
-    @SerialName("rad_solar")
-    val radSolar: Double? = null,
-    val eto: Double? = null,
-    val date: String? = null,
-)
-
-@Serializable
-data class WeatherMsg(
-    val v: Int = PROTOCOL_VERSION,
-    val op: String = Op.UPDATE_WEATHER,
-    val data: WeatherData,
-)
-
 // --- data_request (write to CHR_DATA_REQUEST_UUID) ---------------------------
+// (The legacy `weather` characteristic is no longer used by the app -- the air
+// temperature that feeds the LSTM is pushed as timestamped points via `ingest`.)
 
 @Serializable
 data class DataRequestMsg(
@@ -70,34 +53,6 @@ data class DataCountRequestMsg(
 
 @Serializable
 data class CountMsg(val count: Long)
-
-/**
- * Force an inference cycle now ("force inference" button). Written to
- * CHR_DATA_REQUEST_UUID; the Pi runs LSTM + RF and replies on data_response
- * with a single chunked InferenceDoneMsg.
- */
-@Serializable
-data class InferenceRequestMsg(
-    val v: Int = PROTOCOL_VERSION,
-    val op: String = Op.INFER,
-)
-
-/**
- * Result of a forced inference. On success: ok=true, rec (0 healthy / 1
- * irrigate) and hs30_min (the forecast minimum). On failure: ok=false + msg.
- * Predictions themselves are persisted on the Pi; fetch them with
- * requestPredictions() to draw the curve.
- */
-@Serializable
-data class InferenceDoneMsg(
-    val v: Int = PROTOCOL_VERSION,
-    val op: String = Op.INFER_DONE,
-    val ok: Boolean,
-    val rec: Int? = null,
-    @SerialName("hs30_min")
-    val hs30Min: Double? = null,
-    val msg: String? = null,
-)
 
 // --- data_response (notify chunks on CHR_DATA_RESPONSE_UUID) ----------------
 
@@ -211,4 +166,169 @@ data class StatusMsg(
     val lastSyncMs: Long? = null,
     @SerialName("weather_updated_ms")
     val weatherUpdatedMs: Long? = null,
+)
+
+// --- config (read / write / notify on CHR_CONFIG_UUID) -----------------------
+// Only the config app (TerraLink) uses this; the client dashboard ignores it.
+
+/** "What device is this?" card (static identity; liveness is in StatusMsg). */
+@Serializable
+data class DeviceInfo(
+    val model: String,                       // e.g. "Raspberry Pi Pico WH"
+    val mcu: String,                         // e.g. "RP2040"
+    val img: String,                         // asset key for a bundled PNG, e.g. "pico_wh"
+    val fw: String,
+)
+
+/** One configured sensor slot. */
+@Serializable
+data class SensorInfo(
+    val port: Int,
+    val gpio: Int,
+    val type: String,                        // e.g. "sdi12_aquacheck"
+    val addr: String,
+)
+
+/** Used / free GPIO partition for the pin map. */
+@Serializable
+data class GpioMap(
+    val used: List<Int> = emptyList(),
+    val free: List<Int> = emptyList(),
+)
+
+/** config READ: full snapshot (no `op` -- it's a plain GATT read). */
+@Serializable
+data class ConfigSnapshotMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val device: DeviceInfo,
+    val name: String = "Savia",                          // advertised BLE name (app-editable)
+    @SerialName("sleep_s") val sleepS: Int,
+    @SerialName("deep_sleep") val deepSleep: Boolean,
+    @SerialName("capture_s") val captureS: Int = 3600,   // capture cadence (s)
+    @SerialName("daily_hour") val dailyHour: Int = 20,   // UTC hour of the daily cycle
+    @SerialName("mock") val mockEnabled: Boolean = true, // dev: mock data generator
+    @SerialName("log_level") val logLevel: Int = 1,      // 0=debug, 1=info
+    @SerialName("wake_gpio") val wakeGpio: Int,
+    val sensors: List<SensorInfo> = emptyList(),
+    val gpio: GpioMap = GpioMap(),                        // reserved for the future pin map
+)
+
+/** config WRITE: patch with only the fields being changed. */
+@Serializable
+data class ConfigPatchMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String = Op.SET_CONFIG,
+    val name: String? = null,                            // rename the BLE advertisement
+    @SerialName("sleep_s") val sleepS: Int? = null,
+    @SerialName("deep_sleep") val deepSleep: Boolean? = null,
+    @SerialName("capture_s") val captureS: Int? = null,
+    @SerialName("daily_hour") val dailyHour: Int? = null,
+    @SerialName("mock") val mock: Boolean? = null,
+    @SerialName("log_level") val logLevel: Int? = null,
+)
+
+/** data_request: wipe stored data (dev). Replies with {count:0} on data_response. */
+@Serializable
+data class ClearRequestMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String = Op.CLEAR,
+    val kind: String = "raw",
+)
+
+/**
+ * data_request: inject mock data (dev). kind = "hs10" | "hs30" | "ta" injects one
+ * reading; kind = "pred" publishes a synthetic 24 h HS30 forecast on `pred`.
+ */
+@Serializable
+data class MockRequestMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String = Op.MOCK,
+    val kind: String,
+)
+
+// --- ingest (write to CHR_DATA_REQUEST_UUID) ---------------------------------
+// Upsert one or more timestamped points by (ts_ms, port, kind, depth_cm): if a
+// point already exists its value is overwritten, otherwise it is appended. This
+// is how the app pushes the TA forecast (kind=air_temperature, future ts) and the
+// recent measured TA (past ts) that feed the LSTM -- one point at a time or a
+// batch. depthCm/port carry concrete defaults so the wire never holds a CBOR null
+// (the firmware tolerates null, but sending an int keeps the contract simple).
+
+/** One timestamped point to upsert. */
+@Serializable
+data class IngestPoint(
+    @SerialName("ts_ms") val tsMs: Long,     // epoch UTC ms (past = measured, future = forecast)
+    val kind: String,                        // ReadingKind.*
+    val value: Double,                       // VWC 0..1 or degrees C
+    @SerialName("depth_cm") val depthCm: Int = 0,   // 0 for air; 10/30/... for soil
+    val port: Int = 1,
+)
+
+/** ingest WRITE: a batch of points to create-or-update. */
+@Serializable
+data class IngestMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String = Op.INGEST,
+    val data: List<IngestPoint>,
+)
+
+/** data_response: ingest ack reporting how many points were created vs updated. */
+@Serializable
+data class IngestAckMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String = Op.INGEST_OK,
+    val created: Int = 0,
+    val updated: Int = 0,
+)
+
+// --- auth (read / write on CHR_AUTH_UUID) -----------------------------------
+// Byte-string fields MUST carry @ByteString (CBOR major 2); without it kotlinx
+// encodes ByteArray as an int array and the firmware rejects it.
+
+/** auth READ: {v, prov, authed, nonce}. */
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable
+data class AuthStateMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val prov: Boolean,                 // a password is set
+    val authed: Boolean,               // this connection is authenticated
+    @ByteString val nonce: ByteArray,  // challenge for the next proof
+)
+
+/** auth WRITE: first-time password (only when unprovisioned). key = SHA256(password). */
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable
+data class AuthSetMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String = Op.SETPW,
+    @ByteString val key: ByteArray,
+)
+
+/** auth WRITE: prove knowledge. mac = SHA256(key || nonce). */
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable
+data class AuthMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String = Op.AUTH,
+    @ByteString val mac: ByteArray,
+)
+
+/** auth WRITE: change password. old_mac proves the current one; key = SHA256(new). */
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable
+data class AuthChgMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String = Op.CHGPW,
+    @SerialName("old_mac") @ByteString val oldMac: ByteArray,
+    @ByteString val key: ByteArray,
+)
+
+/** config NOTIFY: ack of a patch (config_ok with the applied values, or config_err + msg). */
+@Serializable
+data class ConfigAckMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String,
+    @SerialName("sleep_s") val sleepS: Int? = null,
+    @SerialName("deep_sleep") val deepSleep: Boolean? = null,
+    val msg: String? = null,
 )
