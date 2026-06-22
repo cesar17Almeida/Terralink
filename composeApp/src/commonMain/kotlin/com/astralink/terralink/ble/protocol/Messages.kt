@@ -176,7 +176,6 @@ data class StatusMsg(
 data class DeviceInfo(
     val model: String,                       // e.g. "Raspberry Pi Pico WH"
     val mcu: String,                         // e.g. "RP2040"
-    val img: String,                         // asset key for a bundled PNG, e.g. "pico_wh"
     val fw: String,
 )
 

@@ -492,13 +492,13 @@ private fun DeviceHeroCard(device: DeviceInfo) {
     ) {
         Column(modifier = Modifier.padding(20.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Placeholder for the device PNG (keyed by device.img). Drop a
+                // Placeholder for the device image (mapped from device.model). Drop a
                 // real image into composeResources/drawable and swap this Box.
                 Box(
                     modifier = Modifier.size(72.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(text = deviceEmoji(device.img), fontSize = 44.sp)
+                    Text(text = deviceEmoji(device.model), fontSize = 44.sp)
                 }
                 Spacer(Modifier.width(16.dp))
                 Column {
@@ -659,9 +659,11 @@ private fun ErrorPanel(message: String, onRetry: () -> Unit) {
     }
 }
 
-private fun deviceEmoji(img: String): String = when {
-    img.contains("pi_zero") || img.contains("raspi") || img.contains("pi4") -> "🍓" // 🍓
-    img.contains("pico") -> "🔲" // 🔲
+// Map the human-readable model to a glyph (Pico boards first, since "Raspberry Pi
+// Pico" also contains "Pi"). Swap for a real per-model drawable later.
+private fun deviceEmoji(model: String): String = when {
+    model.contains("Pico", ignoreCase = true) -> "🔲" // 🔲
+    model.contains("Raspberry", ignoreCase = true) || model.contains("Pi", ignoreCase = true) -> "🍓" // 🍓
     else -> "🔌" // 🔌
 }
 
