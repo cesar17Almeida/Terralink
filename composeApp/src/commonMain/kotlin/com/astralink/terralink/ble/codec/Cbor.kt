@@ -21,10 +21,39 @@ val SaviaCbor: Cbor = Cbor {
     encodeDefaults = true
 }
 
+// Sparse encoder for PATCH messages (e.g. ConfigPatchMsg). A patch only carries
+// the fields that changed; the rest stay null and MUST be omitted. With the
+// default encoder (encodeDefaults = true) those nulls are written as `key: null`,
+// so a name-only save still puts `deep_sleep: null` (and every other field) on
+// the wire -- which the firmware can misapply. encodeDefaults = false drops
+// null/default fields; the mandatory `v`/`op` are kept via @EncodeDefault(ALWAYS).
+// CBOR has no `explicitNulls` flag, hence a second instance instead of a flag.
+@OptIn(ExperimentalSerializationApi::class)
+val SaviaCborSparse: Cbor = Cbor {
+    ignoreUnknownKeys = true
+    encodeDefaults = false
+}
+
 @OptIn(ExperimentalSerializationApi::class)
 inline fun <reified T> encode(msg: T): ByteArray {
     val bytes = try {
         SaviaCbor.encodeToByteArray(msg)
+    } catch (e: SerializationException) {
+        throw CodecError("CBOR encode failed: ${e.message}", e)
+    }
+    if (bytes.size > MAX_CONTROL_MSG_BYTES) {
+        throw CodecError(
+            "encoded message is ${bytes.size} B, exceeds MAX_CONTROL_MSG_BYTES=$MAX_CONTROL_MSG_BYTES"
+        )
+    }
+    return bytes
+}
+
+/** Encode a sparse patch message (unchanged null fields omitted). See [SaviaCborSparse]. */
+@OptIn(ExperimentalSerializationApi::class)
+inline fun <reified T> encodeSparse(msg: T): ByteArray {
+    val bytes = try {
+        SaviaCborSparse.encodeToByteArray(msg)
     } catch (e: SerializationException) {
         throw CodecError("CBOR encode failed: ${e.message}", e)
     }

@@ -6,14 +6,19 @@ import java.awt.Desktop
 import java.io.File
 
 actual class Exporter {
-    actual fun shareText(content: String, fileName: String, mimeType: String) {
-        // No real share sheet on Desktop; save into ~/Downloads (or pwd if
-        // unavailable) and pop the OS file browser at that location.
+    // No real share sheet on Desktop; save into ~/Downloads (or pwd if
+    // unavailable) and pop the OS file browser at that location.
+    actual fun shareText(content: String, fileName: String, mimeType: String) =
+        saveAndReveal(fileName) { it.writeText(content) }
+
+    actual fun shareBytes(content: ByteArray, fileName: String, mimeType: String) =
+        saveAndReveal(fileName) { it.writeBytes(content) }
+
+    private fun saveAndReveal(fileName: String, write: (File) -> Unit) {
         val home = System.getProperty("user.home") ?: "."
         val dir = File(home, "Downloads").takeIf { it.exists() }
             ?: File(System.getProperty("user.dir") ?: ".")
-        val file = File(dir, fileName)
-        file.writeText(content)
+        write(File(dir, fileName))
         runCatching { Desktop.getDesktop().open(dir) }
     }
 }

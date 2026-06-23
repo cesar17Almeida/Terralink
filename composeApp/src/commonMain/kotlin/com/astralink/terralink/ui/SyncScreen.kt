@@ -1,12 +1,23 @@
 package com.astralink.terralink.ui
 
-import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,6 +30,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,17 +38,21 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -47,9 +63,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -64,6 +87,7 @@ import com.astralink.terralink.export.exportFileName
 import com.astralink.terralink.export.readingsToCsv
 import com.astralink.terralink.export.readingsToJson
 import com.astralink.terralink.export.rememberExporter
+import com.astralink.terralink.export.toPngBytes
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.ReadingsRepository
 import com.astralink.terralink.state.StationsRepository
@@ -72,14 +96,16 @@ import com.astralink.terralink.ui.charts.LineChart
 import com.astralink.terralink.ui.charts.MoistureDepthColors
 import com.astralink.terralink.ui.charts.TemperatureDepthColors
 import com.astralink.terralink.ui.components.BackIconButton
-import com.astralink.terralink.ui.components.TimeRangePicker
+import com.astralink.terralink.ui.components.TerraDialog
+import com.astralink.terralink.ui.components.TerraIcons
 import com.astralink.terralink.ui.components.TimeRangePreset
+import com.astralink.terralink.ui.components.TimeRangeSheet
 import com.astralink.terralink.ui.components.resolveTimeRange
+import com.astralink.terralink.ui.components.timeRangeLabel
 import com.astralink.terralink.util.nowMs
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
-import androidx.compose.material3.AlertDialog
 
 // Per-page hard cap to keep each notify stream under our per-page timeout.
 // We page automatically until the Pi returns less than this, so the user
@@ -134,8 +160,22 @@ fun SyncScreen(
     var tablePage by remember { mutableStateOf(0) }
     var activeJob by remember { mutableStateOf<Job?>(null) }
     var showCancelDialog by remember { mutableStateOf(false) }
+    var showRangeSheet by remember { mutableStateOf(false) }
+    var showShareSheet by remember { mutableStateOf(false) }
+    val graphicsLayer = rememberGraphicsLayer()
+    val exporter = rememberExporter()
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
+
+    // The visualization is fed from the local cache, so previously-synced data
+    // shows up the moment the screen opens -- no need to re-download. A sync just
+    // tops up the cache and we reload from it (deduped) when it finishes.
+    var displayReadings by remember { mutableStateOf<List<Reading>>(emptyList()) }
+    suspend fun reloadCached() {
+        val range = resolveTimeRange(preset, customFromMs, customToMs, station.lastSyncMs)
+        displayReadings = ReadingsRepository.selectByRange(station.bleId, range.fromMs, range.toMs)
+    }
+    LaunchedEffect(station.bleId, preset, customFromMs, customToMs) { reloadCached() }
 
     // Subtle haptic ticks at phase transitions. We key on the page index so
     // we don't fire on every chunk (would feel like a buzz). Done and Failed
@@ -161,28 +201,23 @@ fun SyncScreen(
     }
 
     if (showCancelDialog) {
-        AlertDialog(
-            onDismissRequest = { showCancelDialog = false },
-            title = { Text("Cancelar sincronización") },
-            text = {
-                Text(
-                    "Hay una descarga en curso. Si sales ahora se cancelará y " +
-                        "perderás los datos que aún no se hayan guardado.",
-                )
+        TerraDialog(
+            onDismiss = { showCancelDialog = false },
+            title = "Cancelar sincronización",
+            confirmText = "Cancelar descarga",
+            destructive = true,
+            onConfirm = {
+                activeJob?.cancel()
+                showCancelDialog = false
+                onBack()
             },
-            confirmButton = {
-                TextButton(onClick = {
-                    activeJob?.cancel()
-                    showCancelDialog = false
-                    onBack()
-                }) { Text("Cancelar descarga") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showCancelDialog = false }) {
-                    Text("Continuar descarga")
-                }
-            },
-        )
+            dismissText = "Continuar descarga",
+        ) {
+            Text(
+                "Hay una descarga en curso. Si sales ahora se cancelará y " +
+                    "perderás los datos que aún no se hayan guardado.",
+            )
+        }
     }
 
     Scaffold(
@@ -203,22 +238,37 @@ fun SyncScreen(
         ) {
             StationHeaderCard(station = station)
 
+            // Compact range: a one-line summary + calendar icon that opens the
+            // preset/custom picker as a modal, so the row stays small.
             SectionCard(title = "Rango de datos") {
-                TimeRangePicker(
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = timeRangeLabel(preset, customFromMs, customToMs),
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.weight(1f),
+                    )
+                    IconButton(onClick = { showRangeSheet = true }) {
+                        Icon(
+                            imageVector = TerraIcons.CalendarToday,
+                            contentDescription = "Cambiar rango",
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+            }
+
+            if (showRangeSheet) {
+                TimeRangeSheet(
                     preset = preset,
                     customFromMs = customFromMs,
                     customToMs = customToMs,
                     onPresetChange = { preset = it },
-                    onCustomChange = { from, to ->
-                        customFromMs = from
-                        customToMs = to
-                    },
+                    onCustomChange = { from, to -> customFromMs = from; customToMs = to },
+                    onDismiss = { showRangeSheet = false },
                 )
             }
 
-            SectionCard(title = "Estado de la sincronización") {
-                PhaseStepper(phase = phase)
-                Spacer(Modifier.height(12.dp))
+            SectionCard(title = "Sincronización") {
                 StartButton(
                     phase = phase,
                     onStart = {
@@ -236,37 +286,110 @@ fun SyncScreen(
                                 toMs = range.toMs,
                                 onPhase = { phase = it },
                             )
+                            reloadCached()   // pull the freshly-persisted (deduped) rows into the view
                         }
                     },
                 )
-                Spacer(Modifier.height(8.dp))
-                PhaseStatusLine(phase = phase)
+                // The step tracker stays hidden until a sync starts, then slides
+                // in softly; it lingers on Done/Failed to show the outcome.
+                AnimatedVisibility(
+                    visible = phase !is SyncPhase.Idle,
+                    enter = fadeIn(tween(300)) + expandVertically(tween(300)),
+                    exit = fadeOut(tween(200)) + shrinkVertically(tween(200)),
+                ) {
+                    Column {
+                        Spacer(Modifier.height(20.dp))
+                        PhaseStepper(phase = phase)
+                        Spacer(Modifier.height(12.dp))
+                        PhaseStatusLine(phase = phase)
+                    }
+                }
             }
 
-            val done = phase as? SyncPhase.Done
-            if (done != null) {
+            if (displayReadings.isNotEmpty()) {
                 SectionCard(title = "Visualización") {
-                    KindFilterRow(selected = kindFilter, onChange = { kindFilter = it; tablePage = 0 })
+                    // Header: title + share affordance sitting above the chart.
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Gráfico y tabla",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        IconButton(onClick = { showShareSheet = true }) {
+                            Icon(
+                                imageVector = TerraIcons.Share,
+                                contentDescription = "Compartir",
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    KindFilterDropdown(selected = kindFilter, onChange = { kindFilter = it; tablePage = 0 })
                     Spacer(Modifier.height(12.dp))
-                    LineChart(
-                        series = readingsToSeries(done.readings, kindFilter),
-                        yLabel = if (kindFilter == KindFilter.Moisture) "%" else "°C",
-                    )
-                    Spacer(Modifier.height(16.dp))
-                    DataTable(
-                        readings = done.readings,
-                        filter = kindFilter,
-                        page = tablePage,
-                        onPageChange = { tablePage = it },
-                    )
+                    // Soft crossfade between kinds for chart + table.
+                    AnimatedContent(
+                        targetState = kindFilter,
+                        transitionSpec = { fadeIn(tween(250)) togetherWith fadeOut(tween(250)) },
+                        label = "kind-crossfade",
+                    ) { kind ->
+                        Column {
+                            // Capture layer wraps the chart so it can be exported as PNG.
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.surface)
+                                    .drawWithContent {
+                                        graphicsLayer.record { this@drawWithContent.drawContent() }
+                                        drawLayer(graphicsLayer)
+                                    },
+                            ) {
+                                LineChart(
+                                    series = readingsToSeries(displayReadings, kind),
+                                    yLabel = if (kind == KindFilter.Moisture) "%" else "°C",
+                                )
+                            }
+                            Spacer(Modifier.height(16.dp))
+                            DataTable(
+                                readings = displayReadings,
+                                filter = kind,
+                                page = tablePage,
+                                onPageChange = { tablePage = it },
+                            )
+                        }
+                    }
                 }
-
-                ExportSection(
-                    station = station,
-                    readings = done.readings,
-                )
             }
         }
+    }
+
+    if (showShareSheet) {
+        ShareSheet(
+            hasReadings = displayReadings.isNotEmpty(),
+            jsonText = { readingsToJson(displayReadings) },
+            onExportJson = {
+                exporter.shareText(
+                    readingsToJson(displayReadings),
+                    exportFileName(station.bleId, "json", nowMs()), JSON_MIME,
+                )
+            },
+            onExportCsv = {
+                exporter.shareText(
+                    readingsToCsv(displayReadings),
+                    exportFileName(station.bleId, "csv", nowMs()), CSV_MIME,
+                )
+            },
+            onExportImage = {
+                scope.launch {
+                    val bmp = graphicsLayer.toImageBitmap()
+                    exporter.shareBytes(
+                        bmp.toPngBytes(),
+                        exportFileName(station.bleId, "png", nowMs()), "image/png",
+                    )
+                }
+            },
+            onDismiss = { showShareSheet = false },
+        )
     }
 }
 
@@ -343,16 +466,18 @@ private fun PhaseStepper(phase: SyncPhase) {
                 label = label,
             )
             if (i < steps.size - 1) {
+                val lineColor by animateColorAsState(
+                    targetValue = if (i < currentIdx) MaterialTheme.colorScheme.primary
+                                  else MaterialTheme.colorScheme.outlineVariant,
+                    animationSpec = tween(350),
+                    label = "line-color",
+                )
                 Box(
                     modifier = Modifier
                         .padding(horizontal = 4.dp)
                         .height(2.dp)
                         .weight(1f)
-                        .background(
-                            color = if (i < currentIdx)
-                                MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.outlineVariant,
-                        ),
+                        .background(lineColor),
                 )
             }
         }
@@ -361,34 +486,55 @@ private fun PhaseStepper(phase: SyncPhase) {
 
 @Composable
 private fun StepDot(active: Boolean, done: Boolean, failed: Boolean, label: String) {
-    val color = when {
+    val targetColor = when {
         failed -> MaterialTheme.colorScheme.error
-        done -> MaterialTheme.colorScheme.primary
-        active -> MaterialTheme.colorScheme.primary
+        done || active -> MaterialTheme.colorScheme.primary
         else -> MaterialTheme.colorScheme.outlineVariant
     }
-    // While the step is active we pulse the dot's alpha so the user has a
-    // gentle "we're working" signal even when the bottom progress bar isn't
-    // visibly moving yet (e.g. during Counting before the COUNT returns).
-    val infinite = rememberInfiniteTransition(label = "step-blink")
-    val alpha = if (active) {
-        infinite.animateFloat(
-            initialValue = 0.45f,
-            targetValue = 1f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 700, easing = LinearEasing),
-                repeatMode = RepeatMode.Reverse,
-            ),
-            label = "step-alpha",
-        ).value
-    } else 1f
+    // Ease color + size between states so advancing feels smooth, not abrupt.
+    val color by animateColorAsState(targetColor, tween(350), label = "dot-color")
+    val dotSize by animateDpAsState(if (active) 22.dp else 16.dp, tween(350), label = "dot-size")
+    val onPrimary = MaterialTheme.colorScheme.onPrimary
+
+    // Expanding halo while active -- a gentle "we're working" pulse even when the
+    // progress bar isn't moving yet (e.g. Counting before COUNT returns).
+    val infinite = rememberInfiniteTransition(label = "step-pulse")
+    val pulse = if (active) infinite.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1100, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "step-pulse-v",
+    ).value else 0f
+
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Box(
-            modifier = Modifier
-                .size(if (active) 18.dp else 14.dp)
-                .alpha(alpha)
-                .background(color, CircleShape),
-        )
+        Box(modifier = Modifier.size(34.dp), contentAlignment = Alignment.Center) {
+            if (active) {
+                Box(
+                    modifier = Modifier
+                        .size(22.dp + 12.dp * pulse)
+                        .alpha((1f - pulse) * 0.45f)
+                        .background(color, CircleShape),
+                )
+            }
+            Box(
+                modifier = Modifier.size(dotSize).background(color, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                when {
+                    done -> Text(
+                        text = "✓",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = onPrimary,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    active -> Box(Modifier.size(6.dp).background(onPrimary, CircleShape))
+                    else -> Unit
+                }
+            }
+        }
         Spacer(Modifier.height(4.dp))
         Text(
             text = label,
@@ -571,63 +717,139 @@ private suspend fun runStreamingSync(
     }
 }
 
-// --- Export ----------------------------------------------------------------
+// --- Share sheet ------------------------------------------------------------
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ShareSheet(
+    hasReadings: Boolean,
+    jsonText: () -> String?,
+    onExportJson: () -> Unit,
+    onExportCsv: () -> Unit,
+    onExportImage: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scope = rememberCoroutineScope()
+    val clipboard = LocalClipboardManager.current
+    val haptics = LocalHapticFeedback.current
+    fun close() {
+        scope.launch { sheetState.hide() }.invokeOnCompletion {
+            if (!sheetState.isVisible) onDismiss()
+        }
+    }
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp)
+                .padding(bottom = 24.dp),
+        ) {
+            Text(
+                text = "Compartir datos",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 12.dp, bottom = 8.dp),
+            )
+            ShareRow("Copiar JSON al portapapeles", "Pega las lecturas donde quieras", hasReadings) {
+                jsonText()?.let { clipboard.setText(AnnotatedString(it)) }
+                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                close()
+            }
+            ShareRow("Exportar JSON", "Comparte un archivo .json", hasReadings) {
+                onExportJson(); close()
+            }
+            ShareRow("Exportar CSV", "Comparte un archivo .csv", hasReadings) {
+                onExportCsv(); close()
+            }
+            ShareRow("Exportar imagen del gráfico", "Comparte el gráfico actual como PNG", hasReadings) {
+                onExportImage(); close()
+            }
+        }
+    }
+}
 
 @Composable
-private fun ExportSection(
-    station: SavedStation,
-    readings: List<Reading>,
-) {
-    val exporter = rememberExporter()
-    SectionCard(title = "Exportar lecturas") {
+private fun ShareRow(title: String, subtitle: String, enabled: Boolean, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 12.dp)
+            .alpha(if (enabled) 1f else 0.4f),
+    ) {
+        Text(title, style = MaterialTheme.typography.bodyLarge)
         Text(
-            text = "${readings.size} lecturas descargadas en esta sesión.",
+            subtitle,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(
-                modifier = Modifier.weight(1f),
-                onClick = {
-                    val now = nowMs()
-                    exporter.shareText(
-                        content = readingsToCsv(readings),
-                        fileName = exportFileName(station.bleId, "csv", now),
-                        mimeType = CSV_MIME,
-                    )
-                },
-                enabled = readings.isNotEmpty(),
-            ) { Text("Exportar CSV") }
-            OutlinedButton(
-                modifier = Modifier.weight(1f),
-                onClick = {
-                    val now = nowMs()
-                    exporter.shareText(
-                        content = readingsToJson(readings),
-                        fileName = exportFileName(station.bleId, "json", now),
-                        mimeType = JSON_MIME,
-                    )
-                },
-                enabled = readings.isNotEmpty(),
-            ) { Text("Exportar JSON") }
-        }
     }
 }
 
 // --- Chart wiring -----------------------------------------------------------
 
 @Composable
-private fun KindFilterRow(selected: KindFilter, onChange: (KindFilter) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        KindFilter.entries.forEach { k ->
-            FilterChip(
-                selected = selected == k,
-                onClick = { onChange(k) },
-                label = { Text(k.label) },
+private fun KindFilterDropdown(selected: KindFilter, onChange: (KindFilter) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val chevron by animateFloatAsState(if (expanded) 180f else 0f, label = "chevron")
+
+    Box {
+        // Anchor: a slim outlined row showing the current selection.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp))
+                .clickable { expanded = true }
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            KindGlyph(kind = selected)
+            Spacer(Modifier.width(12.dp))
+            Text(
+                text = selected.label,
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                imageVector = TerraIcons.ExpandMore,
+                contentDescription = "Cambiar tipo de dato",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.rotate(chevron),
             )
         }
+
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            KindFilter.entries.forEach { k ->
+                DropdownMenuItem(
+                    text = { Text(k.label) },
+                    onClick = { onChange(k); expanded = false },
+                    leadingIcon = { KindGlyph(kind = k) },
+                    trailingIcon = if (k == selected) {
+                        {
+                            Icon(
+                                imageVector = TerraIcons.Check,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    } else null,
+                )
+            }
+        }
     }
+}
+
+@Composable
+private fun KindGlyph(kind: KindFilter) {
+    val icon = when (kind) {
+        KindFilter.Moisture -> TerraIcons.WaterDrop
+        KindFilter.AirTemp -> TerraIcons.Thermostat
+        KindFilter.SoilTemp -> TerraIcons.Layers
+    }
+    Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
 }
 
 // --- Paginated data table ---------------------------------------------------
@@ -637,6 +859,8 @@ private fun KindFilterRow(selected: KindFilter, onChange: (KindFilter) -> Unit) 
 
 private const val TABLE_PAGE_SIZE = 12
 
+private enum class SortColumn { Date, Depth, Value }
+
 @Composable
 private fun DataTable(
     readings: List<Reading>,
@@ -644,8 +868,23 @@ private fun DataTable(
     page: Int,
     onPageChange: (Int) -> Unit,
 ) {
-    val rows = remember(readings, filter) {
-        readings.filter { it.kind == filter.sensorKind }.sortedByDescending { it.tsMs }
+    // Tap a header to sort by it; tap again to flip direction. Date starts
+    // newest-first; the other columns start ascending.
+    var sortColumn by remember { mutableStateOf(SortColumn.Date) }
+    var sortAsc by remember { mutableStateOf(false) }
+    val onSort: (SortColumn) -> Unit = { col ->
+        if (sortColumn == col) sortAsc = !sortAsc
+        else { sortColumn = col; sortAsc = col != SortColumn.Date }
+        onPageChange(0)
+    }
+    val rows = remember(readings, filter, sortColumn, sortAsc) {
+        val base = readings.filter { it.kind == filter.sensorKind }
+        val cmp: Comparator<Reading> = when (sortColumn) {
+            SortColumn.Date -> compareBy { it.tsMs }
+            SortColumn.Depth -> compareBy { it.depthCm ?: Int.MIN_VALUE }
+            SortColumn.Value -> compareBy { it.value }
+        }
+        if (sortAsc) base.sortedWith(cmp) else base.sortedWith(cmp.reversed())
     }
     if (rows.isEmpty()) {
         Text(
@@ -663,9 +902,9 @@ private fun DataTable(
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-            TableCell("Fecha (UTC)", 0.46f, header = true)
-            TableCell(depthHeader, 0.27f, header = true)
-            TableCell("Valor", 0.27f, header = true, end = true)
+            SortHeaderCell("Fecha (UTC)", 0.46f, SortColumn.Date, sortColumn, sortAsc) { onSort(SortColumn.Date) }
+            SortHeaderCell(depthHeader, 0.27f, SortColumn.Depth, sortColumn, sortAsc) { onSort(SortColumn.Depth) }
+            SortHeaderCell("Valor", 0.27f, SortColumn.Value, sortColumn, sortAsc, end = true) { onSort(SortColumn.Value) }
         }
         HorizontalDivider()
         pageRows.forEach { r ->
@@ -708,6 +947,29 @@ private fun RowScope.TableCell(text: String, weight: Float, header: Boolean = fa
         textAlign = if (end) TextAlign.End else TextAlign.Start,
         color = if (header) MaterialTheme.colorScheme.onSurfaceVariant
                 else MaterialTheme.colorScheme.onSurface,
+    )
+}
+
+@Composable
+private fun RowScope.SortHeaderCell(
+    label: String,
+    weight: Float,
+    column: SortColumn,
+    activeColumn: SortColumn,
+    ascending: Boolean,
+    end: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val active = column == activeColumn
+    val arrow = if (!active) "" else if (ascending) " ↑" else " ↓"
+    Text(
+        text = label + arrow,
+        modifier = Modifier.weight(weight).clickable(onClick = onClick),
+        style = MaterialTheme.typography.labelSmall,
+        fontWeight = FontWeight.SemiBold,
+        textAlign = if (end) TextAlign.End else TextAlign.Start,
+        color = if (active) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }
 

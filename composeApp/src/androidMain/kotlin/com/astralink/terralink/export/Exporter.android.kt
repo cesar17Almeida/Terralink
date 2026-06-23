@@ -9,10 +9,15 @@ import androidx.core.content.FileProvider
 import java.io.File
 
 actual class Exporter internal constructor(private val context: Context) {
-    actual fun shareText(content: String, fileName: String, mimeType: String) {
-        val dir = File(context.cacheDir, "exports").apply { mkdirs() }
-        val file = File(dir, fileName).also { it.writeText(content) }
+    actual fun shareText(content: String, fileName: String, mimeType: String) =
+        share(File(context.cacheDir, "exports").apply { mkdirs() }
+            .let { File(it, fileName).also { f -> f.writeText(content) } }, mimeType)
 
+    actual fun shareBytes(content: ByteArray, fileName: String, mimeType: String) =
+        share(File(context.cacheDir, "exports").apply { mkdirs() }
+            .let { File(it, fileName).also { f -> f.writeBytes(content) } }, mimeType)
+
+    private fun share(file: File, mimeType: String) {
         val authority = "${context.packageName}.fileprovider"
         val uri = FileProvider.getUriForFile(context, authority, file)
 

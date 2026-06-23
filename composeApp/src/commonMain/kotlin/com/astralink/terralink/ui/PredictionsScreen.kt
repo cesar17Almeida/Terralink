@@ -1,6 +1,11 @@
 package com.astralink.terralink.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,8 +16,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,6 +33,11 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -40,6 +52,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.protocol.IngestPoint
@@ -49,6 +62,10 @@ import com.astralink.terralink.ble.protocol.ReadingKind
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.ui.components.BackIconButton
+import com.astralink.terralink.ui.components.SectionHeader
+import com.astralink.terralink.ui.components.Spec
+import com.astralink.terralink.ui.components.SpecTable
+import com.astralink.terralink.ui.components.TerraDialog
 import com.astralink.terralink.util.nowMs
 import kotlinx.coroutines.launch
 
@@ -72,15 +89,17 @@ fun PredictionsScreen(
     onBack: () -> Unit,
 ) {
     var state by remember { mutableStateOf<PredState>(PredState.Loading) }
-    var reloadKey by remember { mutableStateOf(0) }
+    var window48 by remember { mutableStateOf<List<Reading>?>(null) }
+    var refreshing by remember { mutableStateOf(false) }     // soft reload -> fade overlay
+    var loadingLabel by remember { mutableStateOf("Cargando…") }
+    var logsDialog by remember { mutableStateOf(false) }     // logs modal (opened from a failure)
+
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
 
     // The firmware handles ONE data_request at a time and the notify stream is
-    // shared, so these MUST run sequentially in a single coroutine -- two
-    // concurrent reads corrupt each other (readings would silently fail -> no dots).
-    val scope = rememberCoroutineScope()
-    var window48 by remember { mutableStateOf<List<Reading>?>(null) }
-    LaunchedEffect(reloadKey) {
-        state = PredState.Loading
+    // shared, so reads MUST run sequentially in a single coroutine.
+    suspend fun fetchData() {
         val now = nowMs()
         window48 = runCatching {
             active.requestRawReadings(fromMs = now - 48L * 3_600_000L, toMs = now)
@@ -92,6 +111,34 @@ fun PredictionsScreen(
         }
     }
 
+    LaunchedEffect(Unit) { state = PredState.Loading; fetchData() }
+
+    // Tell the user how it went; on failure, offer to open the device logs.
+    suspend fun report(ok: Boolean, message: String) {
+        if (ok) {
+            snackbarHostState.showSnackbar(message)
+        } else {
+            val res = snackbarHostState.showSnackbar(
+                message = message, actionLabel = "Ver logs", duration = SnackbarDuration.Long,
+            )
+            if (res == SnackbarResult.ActionPerformed) logsDialog = true
+        }
+    }
+
+    // Run a station action behind a fade-in loading overlay (content stays on
+    // screen instead of blanking), then refresh the data and report the outcome.
+    fun runAction(label: String, successMsg: String?, failMsg: String, block: suspend () -> Unit) {
+        scope.launch {
+            loadingLabel = label
+            refreshing = true
+            val result = runCatching { block() }
+            if (result.isSuccess) runCatching { fetchData() }
+            refreshing = false
+            if (result.isFailure) report(false, result.exceptionOrNull()?.message ?: failMsg)
+            else if (successMsg != null) report(true, successMsg)
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -99,6 +146,7 @@ fun PredictionsScreen(
                 navigationIcon = { BackIconButton(onClick = onBack) },
             )
         },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { innerPadding ->
         Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
             when (val s = state) {
@@ -106,15 +154,127 @@ fun PredictionsScreen(
                 is PredState.Failed -> Centered {
                     Text(s.message, style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.height(16.dp))
-                    Button(onClick = { reloadKey++ }) { Text("Reintentar") }
+                    Button(onClick = { scope.launch { state = PredState.Loading; fetchData() } }) {
+                        Text("Reintentar")
+                    }
                 }
                 is PredState.Loaded -> PredictionsContent(
                     predictions = s.predictions,
                     window48 = window48,
-                    onIngest = { point -> scope.launch { runCatching { active.ingest(listOf(point)) }; reloadKey++ } },
-                    onMockPred = { scope.launch { runCatching { active.mockReading("pred") }; reloadKey++ } },
-                    onReload = { reloadKey++ },
+                    onIngest = { point ->
+                        runAction("Enviando medida…", "Medida enviada ✓", "No se pudo enviar la medida") {
+                            active.ingest(listOf(point))
+                        }
+                    },
+                    onMockPred = {
+                        runAction("Simulando…", "Pronóstico simulado ✓", "No se pudo simular el pronóstico") {
+                            active.mockReading("pred")
+                        }
+                    },
+                    onReload = {
+                        runAction("Actualizando…", null, "No se pudo actualizar") { }
+                    },
                 )
+            }
+            LoadingOverlay(visible = refreshing, label = loadingLabel)
+        }
+    }
+
+    if (logsDialog) LogsDialog(active = active, onDismiss = { logsDialog = false })
+}
+
+// A soft loading veil: dims (not blanks) the content and floats a spinner pill,
+// fading in/out so a quick action doesn't tear the screen down.
+@Composable
+private fun LoadingOverlay(visible: Boolean, label: String) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(),
+        exit = fadeOut(),
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.2f))
+                // Swallow taps so controls underneath aren't pressed mid-action.
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {},
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 6.dp,
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 22.dp, vertical = 18.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.5.dp)
+                    Spacer(Modifier.width(14.dp))
+                    Text(label, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        }
+    }
+}
+
+// Minimalist logs viewer: pulls the device log ring and shows it in a tidy
+// monospace panel inside the shared modal.
+@Composable
+private fun LogsDialog(active: ActiveSession, onDismiss: () -> Unit) {
+    var logs by remember { mutableStateOf<List<String>?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        runCatching { active.requestLogs() }
+            .onSuccess { logs = it }
+            .onFailure { error = it.message ?: "No se pudieron leer los logs" }
+    }
+    TerraDialog(
+        onDismiss = onDismiss,
+        title = "Logs del dispositivo",
+        confirmText = "Cerrar",
+        onConfirm = onDismiss,
+        dismissText = null,
+    ) {
+        when {
+            error != null -> Text(
+                error ?: "", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            logs == null -> Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(10.dp))
+                Text("Leyendo logs…", style = MaterialTheme.typography.bodySmall)
+            }
+            logs.isNullOrEmpty() -> Text(
+                "Sin logs todavía", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            else -> Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 300.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    logs?.forEach { line ->
+                        Text(
+                            line,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
             }
         }
     }
@@ -146,9 +306,11 @@ private fun PredictionsContent(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        } else if (forecast.isNotEmpty()) {
+            LastPredictionCard(forecast = forecast, recommendation = recommendation)
+            ForecastCard(forecast)
         } else {
             RecommendationCard(recommendation)
-            if (forecast.isNotEmpty()) ForecastCard(forecast)
         }
 
         // Dev: ask the station to publish a synthetic 24 h LSTM forecast.
@@ -250,6 +412,59 @@ private fun SeriesRow(label: String, taken: Int, target: Int) {
     }
 }
 
+// The headline view of the most recent inference: its recommendation plus the
+// data it reported (model, horizon, HS30 next/min/max, confidence). The full
+// hour-by-hour series follows in ForecastCard.
+@Composable
+private fun LastPredictionCard(forecast: List<Prediction>, recommendation: Int?) {
+    val values = forecast.map { it.value }
+    val min = values.min()
+    val max = values.max()
+    val model = forecast.firstOrNull()?.model ?: "lstm-hs30"
+    val confidence = forecast.mapNotNull { it.confidence }.takeIf { it.isNotEmpty() }?.average()
+
+    val (recoLabel, recoDetail) = when (recommendation) {
+        1 -> "Regar mañana" to "El modelo prevé estrés hídrico en las próximas 24 h."
+        0 -> "No regar" to "La humedad prevista se mantiene en rango saludable."
+        else -> "Sin recomendación" to "Aún no hay salida del clasificador."
+    }
+    val accent = when (recommendation) {
+        1 -> MaterialTheme.colorScheme.tertiary    // riego -> agua (teal)
+        0 -> MaterialTheme.colorScheme.primary     // sano -> verde
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    val specs = buildList {
+        add(Spec("Modelo", model))
+        add(Spec("Horizonte", "${forecast.size} h"))
+        add(Spec("Desde", "${formatDateTime(forecast.first().tsMs)} UTC"))
+        add(Spec("Hasta", "${formatDateTime(forecast.last().tsMs)} UTC"))
+        add(Spec("HS30 próximo", fmt(forecast.first().value)))
+        add(Spec("HS30 mín / máx", "${fmt(min)} / ${fmt(max)}"))
+        if (confidence != null) add(Spec("Confianza", "${(confidence * 100).toInt()}%"))
+    }
+
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
+    ) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            SectionHeader("Última predicción", accent = accent)
+            Spacer(Modifier.height(12.dp))
+            Text(recoLabel, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                recoDetail,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(16.dp))
+            SpecTable(rows = specs)
+        }
+    }
+}
+
 @Composable
 private fun RecommendationCard(recommendation: Int?) {
     val (label, detail) = when (recommendation) {
@@ -296,9 +511,19 @@ private fun ForecastCard(forecast: List<Prediction>) {
             HorizontalDivider()
             forecast.forEachIndexed { i, p ->
                 Spacer(Modifier.height(8.dp))
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("H+${i + 1}", style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column {
+                        Text("H+${i + 1}", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "${formatDateTime(p.tsMs)} UTC",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     Text(fmt(p.value), style = MaterialTheme.typography.bodyMedium)
                 }
             }
@@ -313,6 +538,27 @@ private fun Centered(content: @Composable () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) { content() }
+}
+
+private const val MS_PER_DAY = 86_400_000L
+
+// Epoch ms (UTC) -> "MM-DD HH:MM" via the civil-from-days algorithm (no platform
+// date API; same approach as SyncScreen). Forecast timestamps are UTC.
+private fun formatDateTime(ms: Long): String {
+    val epochDay = ms / MS_PER_DAY
+    val msOfDay = ms % MS_PER_DAY
+    val hh = (msOfDay / 3_600_000L).toInt()
+    val mm = ((msOfDay / 60_000L) % 60).toInt()
+    val z = epochDay + 719_468
+    val era = if (z >= 0) z / 146_097 else (z - 146_096) / 146_097
+    val doe = z - era * 146_097
+    val yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365
+    val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    val mp = (5 * doy + 2) / 153
+    val d = doy - (153 * mp + 2) / 5 + 1
+    val mon = if (mp < 10) mp + 3 else mp - 9
+    fun p2(n: Long) = n.toString().padStart(2, '0')
+    return "${p2(mon)}-${p2(d)} ${p2(hh.toLong())}:${p2(mm.toLong())}"
 }
 
 private fun fmt(v: Double): String {

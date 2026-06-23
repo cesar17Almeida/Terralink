@@ -10,6 +10,7 @@ import androidx.compose.runtime.Composable
  */
 expect class Exporter {
     fun shareText(content: String, fileName: String, mimeType: String)
+    fun shareBytes(content: ByteArray, fileName: String, mimeType: String)
 }
 
 @Composable

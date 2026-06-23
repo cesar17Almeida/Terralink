@@ -13,6 +13,13 @@ import com.astralink.terralink.db.TerralinkDb
  */
 object ReadingsRepository {
 
+    // Air temperature has no depth, so its rows carry depth_cm = NULL. SQLite
+    // treats NULLs as distinct in a PRIMARY KEY, so those rows would NOT dedup on
+    // an overlapping re-sync (soil rows do, they have a real depth). We store a
+    // sentinel for "no depth" so the composite PK + INSERT OR IGNORE also dedups
+    // air temperature, and map it back to null on read.
+    private const val NO_DEPTH_SENTINEL = -1L
+
     private var db: TerralinkDb? = null
     private var initialized = false
 
@@ -34,7 +41,7 @@ object ReadingsRepository {
                     port = r.port.toLong(),
                     kind = r.kind,
                     value_ = r.value,
-                    depth_cm = r.depthCm?.toLong(),
+                    depth_cm = r.depthCm?.toLong() ?: NO_DEPTH_SENTINEL,
                 )
             }
         }
@@ -62,7 +69,7 @@ object ReadingsRepository {
                     port = row.port.toInt(),
                     kind = row.kind,
                     value = row.value_,
-                    depthCm = row.depth_cm?.toInt(),
+                    depthCm = row.depth_cm?.toInt()?.takeIf { it >= 0 },   // sentinel -> null
                 )
             }
 

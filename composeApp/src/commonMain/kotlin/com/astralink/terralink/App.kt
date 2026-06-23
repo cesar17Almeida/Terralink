@@ -1,6 +1,5 @@
 package com.astralink.terralink
 
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -20,6 +19,7 @@ import com.astralink.terralink.ui.SplashScreen
 import com.astralink.terralink.ui.StationsListScreen
 import com.astralink.terralink.ui.SyncScreen
 import com.astralink.terralink.ui.UpdateFirmwareScreen
+import com.astralink.terralink.ui.theme.TerraTheme
 import com.astralink.terralink.util.nowMs
 
 private sealed interface Screen {
@@ -37,7 +37,7 @@ private sealed interface Screen {
 @Composable
 @Preview
 fun App() {
-    MaterialTheme {
+    TerraTheme {
         val session = remember { SaviaSession() }
         var screen by remember { mutableStateOf<Screen>(Screen.Splash) }
         // Shared across Device / UpdateFirmware / Sync so the L2CAP transfer

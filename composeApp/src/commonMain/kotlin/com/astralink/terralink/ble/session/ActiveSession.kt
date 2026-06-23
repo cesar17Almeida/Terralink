@@ -1,10 +1,12 @@
 package com.astralink.terralink.ble.session
 
 import com.astralink.terralink.ble.SaviaConnection
+import com.astralink.terralink.ble.codec.CodecError
 import com.astralink.terralink.ble.codec.SaviaCbor
 import com.astralink.terralink.ble.codec.chunkedDecode
 import com.astralink.terralink.ble.codec.decode
 import com.astralink.terralink.ble.codec.encode
+import com.astralink.terralink.ble.codec.encodeSparse
 import com.astralink.terralink.ble.protocol.Aggregation
 import com.astralink.terralink.ble.protocol.BlobControlEnvelope
 import com.astralink.terralink.ble.protocol.BlobKind
@@ -54,6 +56,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromByteArray
 
 private const val L2CAP_CHUNK_BYTES = 4096
@@ -183,7 +186,19 @@ class ActiveSession internal constructor(
         val chunks = runDataRequest {
             connection.write(CHR_DATA_REQUEST_UUID, encode(IngestMsg(data = batch)))
         }
-        return SaviaCbor.decodeFromByteArray<IngestAckMsg>(chunkedDecode(chunks))
+        val payload = chunkedDecode(chunks)
+        return try {
+            SaviaCbor.decodeFromByteArray<IngestAckMsg>(payload)
+        } catch (e: SerializationException) {
+            // The station answered, but not with a valid ingest ack. Almost always
+            // means the firmware doesn't support ingest (an old savia_c build, or the
+            // Pi/savia_py which has no ingest path) -- surface that, not a raw CBOR error.
+            throw CodecError(
+                "El firmware no devolvió un ack de ingest válido. Reflashea la última " +
+                    "versión de savia_c (la estación Python no soporta ingest).",
+                e,
+            )
+        }
     }
 
     // --- config (device card + deep sleep + sensor pins) -------------------
@@ -197,7 +212,9 @@ class ActiveSession internal constructor(
      * snapshot, so the caller can confirm the station actually applied it.
      */
     suspend fun writeConfig(patch: ConfigPatchMsg): ConfigSnapshotMsg {
-        connection.write(CHR_CONFIG_UUID, encode(patch))
+        // Sparse encode: only the changed fields travel, so a name-only save
+        // doesn't carry deep_sleep/sleep_s/etc. (which the firmware could misapply).
+        connection.write(CHR_CONFIG_UUID, encodeSparse(patch))
         return readConfig()
     }
 

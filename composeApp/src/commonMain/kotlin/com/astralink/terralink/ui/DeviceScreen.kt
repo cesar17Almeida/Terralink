@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -20,6 +21,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -48,6 +50,7 @@ import com.astralink.terralink.ui.components.BackIconButton
 import com.astralink.terralink.ui.components.ConnectionStatusChip
 import com.astralink.terralink.ui.components.PasswordField
 import com.astralink.terralink.ui.components.PremiumTile
+import com.astralink.terralink.ui.components.TerraIcons
 import com.astralink.terralink.util.nowMs
 
 private sealed class ConnState {
@@ -195,7 +198,14 @@ private fun AuthPanel(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Text("🔒 Estación protegida", style = MaterialTheme.typography.titleMedium,
+        Icon(
+            imageVector = TerraIcons.Lock,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.size(32.dp),
+        )
+        Spacer(Modifier.height(8.dp))
+        Text("Estación protegida", style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(8.dp))
         Text("Introduce la contraseña de $stationName",
@@ -258,19 +268,26 @@ private fun TileGrid(
     onViewPredictions: () -> Unit,
     onConfigure: () -> Unit,
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        PremiumTile(
-            title = "Sincronizar", caption = "Descargar datos", glyph = "↻",
-            onClick = onSyncData, modifier = Modifier.weight(1f),
-        )
-        PremiumTile(
-            title = "Predicciones", caption = "Salida del modelo", glyph = "📈",
-            onClick = onViewPredictions, modifier = Modifier.weight(1f),
-        )
-        PremiumTile(
-            title = "Configurar", caption = "Ajustes", glyph = "⚙",
-            onClick = onConfigure, modifier = Modifier.weight(1f),
-        )
+    // Two tiles per row: wider cards so titles/captions no longer truncate.
+    // An odd count leaves one empty half-slot on the last row.
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            PremiumTile(
+                title = "Sincronizar", caption = "Descargar datos", icon = TerraIcons.Sync,
+                onClick = onSyncData, modifier = Modifier.weight(1f),
+            )
+            PremiumTile(
+                title = "Predicciones", caption = "Salida del modelo", icon = TerraIcons.ShowChart,
+                onClick = onViewPredictions, modifier = Modifier.weight(1f),
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            PremiumTile(
+                title = "Configurar", caption = "Ajustes", icon = TerraIcons.Settings,
+                onClick = onConfigure, modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.weight(1f))
+        }
     }
 }
 

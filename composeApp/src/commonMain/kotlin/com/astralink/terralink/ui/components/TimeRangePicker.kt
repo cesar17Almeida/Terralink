@@ -6,22 +6,29 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.astralink.terralink.util.nowMs
+import kotlinx.coroutines.launch
 
 /**
  * Time range presets the user can pick. `Custom` opens a from/to date
@@ -53,6 +60,72 @@ fun resolveTimeRange(
             fromMs = customFromMs ?: (now - 24 * MS_PER_HOUR),
             toMs = customToMs ?: now,
         )
+    }
+}
+
+/** One-line human summary of the current selection, for the compact row. */
+fun timeRangeLabel(
+    preset: TimeRangePreset,
+    customFromMs: Long?,
+    customToMs: Long?,
+): String = when (preset) {
+    TimeRangePreset.Last24h -> "Últimas 24 horas"
+    TimeRangePreset.Last7d -> "Últimos 7 días"
+    TimeRangePreset.Custom ->
+        "${formatDate(customFromMs ?: (nowMs() - 24 * MS_PER_HOUR))} → " +
+            formatDate(customToMs ?: nowMs())
+}
+
+/**
+ * Bottom-sheet modal wrapping [TimeRangePicker], opened from the calendar
+ * icon to keep the screen compact. Quick presets (24 h / 7 d) auto-close;
+ * Custom stays open so the user can set both dates, then taps "Listo".
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TimeRangeSheet(
+    preset: TimeRangePreset,
+    customFromMs: Long?,
+    customToMs: Long?,
+    onPresetChange: (TimeRangePreset) -> Unit,
+    onCustomChange: (fromMs: Long?, toMs: Long?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scope = rememberCoroutineScope()
+    fun hideThenDismiss() {
+        scope.launch { sheetState.hide() }.invokeOnCompletion {
+            if (!sheetState.isVisible) onDismiss()
+        }
+    }
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp),
+        ) {
+            Text(
+                text = "Rango de datos",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(16.dp))
+            TimeRangePicker(
+                preset = preset,
+                customFromMs = customFromMs,
+                customToMs = customToMs,
+                onPresetChange = { p ->
+                    onPresetChange(p)
+                    if (p != TimeRangePreset.Custom) hideThenDismiss()
+                },
+                onCustomChange = onCustomChange,
+            )
+            Spacer(Modifier.height(20.dp))
+            Button(onClick = { hideThenDismiss() }, modifier = Modifier.fillMaxWidth()) {
+                Text("Listo")
+            }
+        }
     }
 }
 

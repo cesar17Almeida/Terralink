@@ -1,5 +1,6 @@
 package com.astralink.terralink.ble.protocol
 
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -212,11 +213,17 @@ data class ConfigSnapshotMsg(
     val gpio: GpioMap = GpioMap(),                        // reserved for the future pin map
 )
 
-/** config WRITE: patch with only the fields being changed. */
+/**
+ * config WRITE: a SPARSE patch -- only the fields being changed are non-null.
+ * Encoded with [encodeSparse] so unchanged (null) fields are omitted from the
+ * wire (a name-only save must NOT carry `deep_sleep` etc.). `v`/`op` are kept
+ * via @EncodeDefault(ALWAYS) since the firmware requires them.
+ */
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class ConfigPatchMsg(
-    val v: Int = PROTOCOL_VERSION,
-    val op: String = Op.SET_CONFIG,
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS) val v: Int = PROTOCOL_VERSION,
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS) val op: String = Op.SET_CONFIG,
     val name: String? = null,                            // rename the BLE advertisement
     @SerialName("sleep_s") val sleepS: Int? = null,
     @SerialName("deep_sleep") val deepSleep: Boolean? = null,

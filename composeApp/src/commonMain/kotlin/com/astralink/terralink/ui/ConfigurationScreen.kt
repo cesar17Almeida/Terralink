@@ -1,6 +1,8 @@
 package com.astralink.terralink.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,10 +17,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -28,10 +30,9 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -48,18 +49,25 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.astralink.terralink.ble.protocol.ConfigPatchMsg
 import com.astralink.terralink.ble.protocol.ConfigSnapshotMsg
 import com.astralink.terralink.ble.protocol.DeviceInfo
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.model.SavedStation
+import com.astralink.terralink.state.ReadingsRepository
 import com.astralink.terralink.ui.components.BackIconButton
 import com.astralink.terralink.ui.components.PasswordField
+import com.astralink.terralink.ui.components.SectionHeader
+import com.astralink.terralink.ui.components.Spec
+import com.astralink.terralink.ui.components.SpecTable
+import com.astralink.terralink.ui.components.TerraDialog
+import com.astralink.terralink.ui.components.TerraIcons
+import com.astralink.terralink.ui.components.TerraTextField
 import kotlinx.coroutines.launch
 
 // Matches the firmware's accepted sleep range (SAVIA_SLEEP_MIN_S..MAX_S).
@@ -98,7 +106,7 @@ fun ConfigurationScreen(
     when (val p = phase) {
         ConfigPhase.Loading -> PlainConfigScaffold(onBack) { CenteredProgress("Leyendo configuración…") }
         is ConfigPhase.Failed -> PlainConfigScaffold(onBack) { ErrorPanel(p.message, onRetry = { reloadKey++ }) }
-        is ConfigPhase.Ready -> ConfigReady(p.snapshot, active, onViewLogs, onBack)
+        is ConfigPhase.Ready -> ConfigReady(station, p.snapshot, active, onViewLogs, onBack)
     }
 }
 
@@ -120,6 +128,7 @@ private fun PlainConfigScaffold(onBack: () -> Unit, content: @Composable () -> U
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ConfigReady(
+    station: SavedStation,
     snapshot: ConfigSnapshotMsg,
     active: ActiveSession,
     onViewLogs: () -> Unit,
@@ -127,6 +136,15 @@ private fun ConfigReady(
 ) {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    val focusManager = LocalFocusManager.current
+
+    // Locally cached history for this station (persisted on every sync).
+    var cachedCount by remember(station) { mutableStateOf<Long?>(null) }
+    var deletingLocal by remember { mutableStateOf(false) }
+    var confirmDeleteLocal by remember { mutableStateOf(false) }
+    LaunchedEffect(station.bleId, deletingLocal) {
+        cachedCount = runCatching { ReadingsRepository.countByStation(station.bleId) }.getOrNull()
+    }
 
     // Committed = last value we know the station holds; updated on a successful save.
     var committedName by remember(snapshot) { mutableStateOf(snapshot.name) }
@@ -213,6 +231,10 @@ private fun ConfigReady(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                // Tap anywhere outside a field to drop focus + hide the keyboard.
+                .pointerInput(Unit) {
+                    detectTapGestures(onTap = { focusManager.clearFocus() })
+                }
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -251,28 +273,61 @@ private fun ConfigReady(
                 Text("Ver logs del dispositivo")
             }
 
+            LocalDataCard(
+                count = cachedCount,
+                deleting = deletingLocal,
+                onDelete = { confirmDeleteLocal = true },
+            )
+
             error?.let {
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
         }
     }
 
-    if (confirmClear) {
-        AlertDialog(
-            onDismissRequest = { confirmClear = false },
-            title = { Text("¿Borrar todos los datos?") },
-            text = { Text("Se eliminarán todas las lecturas y predicciones guardadas en el dispositivo.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmClear = false
-                    clearing = true
-                    scope.launch {
-                        try { active.clearData() } catch (_: Throwable) {} finally { clearing = false }
+    if (confirmDeleteLocal) {
+        TerraDialog(
+            onDismiss = { confirmDeleteLocal = false },
+            title = "¿Eliminar datos guardados?",
+            confirmText = "Eliminar",
+            destructive = true,
+            onConfirm = {
+                confirmDeleteLocal = false
+                deletingLocal = true
+                scope.launch {
+                    try {
+                        ReadingsRepository.deleteByStation(station.bleId)
+                        snackbarHostState.showSnackbar("Datos del teléfono eliminados ✓")
+                    } finally {
+                        deletingLocal = false
                     }
-                }) { Text("Borrar") }
+                }
             },
-            dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancelar") } },
-        )
+        ) {
+            Text(
+                "Se eliminarán las lecturas históricas de esta estación guardadas en este " +
+                    "teléfono. Los datos en el dispositivo no se tocan; puedes volver a " +
+                    "descargarlas sincronizando.",
+            )
+        }
+    }
+
+    if (confirmClear) {
+        TerraDialog(
+            onDismiss = { confirmClear = false },
+            title = "¿Borrar todos los datos?",
+            confirmText = "Borrar",
+            destructive = true,
+            onConfirm = {
+                confirmClear = false
+                clearing = true
+                scope.launch {
+                    try { active.clearData() } catch (_: Throwable) {} finally { clearing = false }
+                }
+            },
+        ) {
+            Text("Se eliminarán todas las lecturas y predicciones guardadas en el dispositivo.")
+        }
     }
 
     if (pwDialog) {
@@ -312,19 +367,28 @@ private fun ConfigReady(
 
 @Composable
 private fun SecurityCard(prov: Boolean?, onManage: () -> Unit) {
+    val statusColor = when (prov) {
+        true -> MaterialTheme.colorScheme.primary
+        false -> MaterialTheme.colorScheme.error
+        null -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
         Column(modifier = Modifier.padding(20.dp)) {
-            Text("Seguridad", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = when (prov) {
-                    true -> "Protegida con contraseña."
-                    false -> "Sin contraseña: cualquiera con la app puede controlarla."
-                    null -> "Comprobando…"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            SectionHeader("Seguridad", accent = statusColor)
+            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(modifier = Modifier.size(8.dp).background(statusColor, CircleShape))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = when (prov) {
+                        true -> "Protegida con contraseña."
+                        false -> "Sin contraseña: cualquiera con la app puede controlarla."
+                        null -> "Comprobando…"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Spacer(Modifier.height(12.dp))
             OutlinedButton(
                 onClick = onManage,
@@ -350,42 +414,35 @@ private fun PasswordDialog(
     var confirm by remember { mutableStateOf("") }
     val mismatch = confirm.isNotEmpty() && newPw != confirm
     val canSubmit = newPw.length >= 4 && newPw == confirm && (!provisioned || old.isNotEmpty()) && !busy
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(if (provisioned) "Cambiar contraseña" else "Establecer contraseña") },
-        text = {
-            Column {
-                if (provisioned) {
-                    PasswordField(
-                        value = old, onValueChange = { old = it },
-                        label = "Contraseña actual", modifier = Modifier.fillMaxWidth(),
-                    )
-                    Spacer(Modifier.height(8.dp))
-                }
-                PasswordField(
-                    value = newPw, onValueChange = { newPw = it },
-                    label = "Nueva contraseña (mín. 4)", modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(8.dp))
-                PasswordField(
-                    value = confirm, onValueChange = { confirm = it },
-                    label = "Repite la nueva",
-                    isError = mismatch || error != null,
-                    supportingText = {
-                        if (mismatch) Text("No coinciden")
-                        else error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { onSubmit(old, newPw) }, enabled = canSubmit) {
-                Text(if (busy) "Guardando…" else "Guardar")
-            }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
-    )
+    TerraDialog(
+        onDismiss = onDismiss,
+        title = if (provisioned) "Cambiar contraseña" else "Establecer contraseña",
+        confirmText = if (busy) "Guardando…" else "Guardar",
+        onConfirm = { onSubmit(old, newPw) },
+        confirmEnabled = canSubmit,
+    ) {
+        if (provisioned) {
+            PasswordField(
+                value = old, onValueChange = { old = it },
+                label = "Contraseña actual",
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+        PasswordField(
+            value = newPw, onValueChange = { newPw = it },
+            label = "Nueva contraseña (mín. 4)",
+        )
+        Spacer(Modifier.height(8.dp))
+        PasswordField(
+            value = confirm, onValueChange = { confirm = it },
+            label = "Repite la nueva",
+            isError = mismatch || error != null,
+            supportingText = {
+                if (mismatch) Text("No coinciden")
+                else error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            },
+        )
+    }
 }
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
@@ -400,7 +457,7 @@ private fun DevCard(
 ) {
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
         Column(modifier = Modifier.padding(20.dp)) {
-            Text("Desarrollo", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
+            SectionHeader("Desarrollo", accent = MaterialTheme.colorScheme.secondary)
 
             Spacer(Modifier.height(12.dp))
             Row(
@@ -443,6 +500,37 @@ private fun DevCard(
     }
 }
 
+@Composable
+private fun LocalDataCard(count: Long?, deleting: Boolean, onDelete: () -> Unit) {
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            SectionHeader("Datos guardados", accent = MaterialTheme.colorScheme.error)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = when (count) {
+                    null -> "Lecturas históricas guardadas en este teléfono."
+                    0L -> "No hay lecturas guardadas en este teléfono."
+                    else -> "$count lecturas guardadas en este teléfono."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = onDelete,
+                enabled = !deleting && (count == null || count > 0L),
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error),
+            ) {
+                Icon(TerraIcons.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(if (deleting) "Eliminando…" else "Eliminar datos históricos")
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun StationCard(
@@ -451,15 +539,20 @@ private fun StationCard(
     onNameChange: (String) -> Unit,
     nameValid: Boolean,
 ) {
+    val specs = buildList {
+        add(Spec("Captura", "cada ${secondsToHuman(snapshot.captureS)}"))
+        add(Spec("Ciclo diario", "${snapshot.dailyHour}:00 UTC"))
+        snapshot.sensors.forEach { s -> add(Spec("Sensor ${s.port}", "GPIO ${s.gpio} · ${s.type}")) }
+        add(Spec("Botón", "GPIO ${snapshot.wakeGpio}"))
+    }
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text("Estación", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
-            Spacer(Modifier.height(10.dp))
-            OutlinedTextField(
+        Column(modifier = Modifier.padding(20.dp)) {
+            SectionHeader("Estación")
+            Spacer(Modifier.height(12.dp))
+            TerraTextField(
                 value = name,
                 onValueChange = onNameChange,
-                label = { Text("Nombre BLE") },
-                singleLine = true,
+                label = "Nombre BLE",
                 isError = name.isNotEmpty() && !nameValid,
                 supportingText = {
                     Text(
@@ -467,18 +560,15 @@ private fun StationCard(
                         else "Con el que aparece al buscar por Bluetooth",
                     )
                 },
-                modifier = Modifier.fillMaxWidth(),
             )
-            Spacer(Modifier.height(10.dp))
-            InfoRow("Captura", "cada ${secondsToHuman(snapshot.captureS)}")
-            Spacer(Modifier.height(6.dp))
-            InfoRow("Ciclo diario", "${snapshot.dailyHour}:00 UTC")
-            snapshot.sensors.forEach { s ->
-                Spacer(Modifier.height(6.dp))
-                InfoRow("Sensor ${s.port}", "GPIO ${s.gpio} · ${s.type}")
-            }
-            Spacer(Modifier.height(6.dp))
-            InfoRow("Botón", "GPIO ${snapshot.wakeGpio}")
+            Spacer(Modifier.height(14.dp))
+            Text(
+                "Programación y hardware",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            SpecTable(rows = specs)
         }
     }
 }
@@ -492,13 +582,18 @@ private fun DeviceHeroCard(device: DeviceInfo) {
     ) {
         Column(modifier = Modifier.padding(20.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Placeholder for the device image (mapped from device.model). Drop a
-                // real image into composeResources/drawable and swap this Box.
                 Box(
-                    modifier = Modifier.size(72.dp),
+                    modifier = Modifier
+                        .size(64.dp)
+                        .background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(text = deviceEmoji(device.model), fontSize = 44.sp)
+                    Icon(
+                        imageVector = TerraIcons.Memory,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.size(34.dp),
+                    )
                 }
                 Spacer(Modifier.width(16.dp))
                 Column {
@@ -516,10 +611,7 @@ private fun DeviceHeroCard(device: DeviceInfo) {
             }
 
             Spacer(Modifier.height(16.dp))
-            HorizontalDivider()
-            Spacer(Modifier.height(16.dp))
-
-            InfoRow("Firmware", "savia ${device.fw}")
+            SpecTable(rows = listOf(Spec("Firmware", "savia ${device.fw}")))
         }
     }
 }
@@ -542,8 +634,8 @@ private fun EnergyCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Ahorro de energía", style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Medium)
+                    SectionHeader("Ahorro de energía", accent = MaterialTheme.colorScheme.tertiary)
+                    Spacer(Modifier.height(4.dp))
                     Text(
                         text = if (deepSleep) "El equipo duerme entre ciclos (radio apagada)"
                                else "El equipo permanece despierto y visible",
@@ -574,11 +666,10 @@ private fun EnergyCard(
 
             if (advanced) {
                 Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
+                TerraTextField(
                     value = sleepText,
                     onValueChange = onSleepChange,
-                    label = { Text("Tiempo de sueño (segundos)") },
-                    singleLine = true,
+                    label = "Tiempo de sueño (segundos)",
                     isError = sleepText.isNotEmpty() && !sleepValid,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     supportingText = {
@@ -588,7 +679,6 @@ private fun EnergyCard(
                             Text(sleepText.toIntOrNull()?.let { "= ${secondsToHuman(it)}" } ?: "")
                         }
                     },
-                    modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(8.dp))
                 SleepPresets(onPick = { onSleepChange(it.toString()) })
@@ -610,24 +700,6 @@ private fun SleepPresets(onPick: (Int) -> Unit) {
 }
 
 // --- small shared pieces ----------------------------------------------------
-
-@Composable
-private fun InfoRow(label: String, value: String) {
-    Row(modifier = Modifier.fillMaxWidth()) {
-        Text(
-            text = label,
-            modifier = Modifier.weight(0.42f),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Text(
-            text = value,
-            modifier = Modifier.weight(0.58f),
-            style = MaterialTheme.typography.bodyMedium,
-            fontFamily = FontFamily.Monospace,
-        )
-    }
-}
 
 @Composable
 private fun CenteredProgress(text: String) {
@@ -657,14 +729,6 @@ private fun ErrorPanel(message: String, onRetry: () -> Unit) {
         Spacer(Modifier.height(20.dp))
         Button(onClick = onRetry) { Text("Reintentar") }
     }
-}
-
-// Map the human-readable model to a glyph (Pico boards first, since "Raspberry Pi
-// Pico" also contains "Pi"). Swap for a real per-model drawable later.
-private fun deviceEmoji(model: String): String = when {
-    model.contains("Pico", ignoreCase = true) -> "🔲" // 🔲
-    model.contains("Raspberry", ignoreCase = true) || model.contains("Pi", ignoreCase = true) -> "🍓" // 🍓
-    else -> "🔌" // 🔌
 }
 
 private fun secondsToHuman(s: Int): String = when {

@@ -2,22 +2,42 @@ package com.astralink.terralink.export
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import kotlinx.cinterop.BetaInteropApi
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.addressOf
+import kotlinx.cinterop.usePinned
 import platform.Foundation.NSCachesDirectory
+import platform.Foundation.NSData
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSString
 import platform.Foundation.NSURL
 import platform.Foundation.NSUTF8StringEncoding
 import platform.Foundation.NSUserDomainMask
 import platform.Foundation.create
+import platform.Foundation.dataWithBytes
 import platform.Foundation.writeToURL
 import platform.UIKit.UIActivityViewController
 import platform.UIKit.UIApplication
 import platform.UIKit.UIViewController
 
-@OptIn(ExperimentalForeignApi::class)
+@OptIn(ExperimentalForeignApi::class, BetaInteropApi::class)
 actual class Exporter {
     actual fun shareText(content: String, fileName: String, mimeType: String) {
+        val fileUrl = exportFileUrl(fileName) ?: return
+        NSString.create(string = content).writeToURL(
+            url = fileUrl, atomically = true,
+            encoding = NSUTF8StringEncoding, error = null,
+        )
+        present(fileUrl)
+    }
+
+    actual fun shareBytes(content: ByteArray, fileName: String, mimeType: String) {
+        val fileUrl = exportFileUrl(fileName) ?: return
+        content.toNSData().writeToURL(fileUrl, true)
+        present(fileUrl)
+    }
+
+    private fun exportFileUrl(fileName: String): NSURL? {
         val fm = NSFileManager.defaultManager
         val cachesUrl = fm.URLForDirectory(
             directory = NSCachesDirectory,
@@ -25,21 +45,13 @@ actual class Exporter {
             appropriateForURL = null,
             create = true,
             error = null,
-        ) ?: return
-        val exportsUrl = cachesUrl.URLByAppendingPathComponent("exports", true)
-            ?: return
+        ) ?: return null
+        val exportsUrl = cachesUrl.URLByAppendingPathComponent("exports", true) ?: return null
         fm.createDirectoryAtURL(exportsUrl, true, null, null)
-        val fileUrl = exportsUrl.URLByAppendingPathComponent(fileName)
-            ?: return
+        return exportsUrl.URLByAppendingPathComponent(fileName)
+    }
 
-        val nsString = NSString.create(string = content)
-        nsString.writeToURL(
-            url = fileUrl,
-            atomically = true,
-            encoding = NSUTF8StringEncoding,
-            error = null,
-        )
-
+    private fun present(fileUrl: NSURL) {
         val host = topViewController() ?: return
         val activityVc = UIActivityViewController(
             activityItems = listOf(fileUrl),
@@ -49,6 +61,14 @@ actual class Exporter {
         // popoverPresentationController anchoring; revisit if we ship an
         // iPad-capable build.
         host.presentViewController(activityVc, animated = true, completion = null)
+    }
+}
+
+@OptIn(ExperimentalForeignApi::class)
+private fun ByteArray.toNSData(): NSData {
+    if (isEmpty()) return NSData()
+    return usePinned { pinned ->
+        NSData.dataWithBytes(pinned.addressOf(0), this.size.toULong())
     }
 }
 

@@ -1,5 +1,6 @@
 package com.astralink.terralink.ble.codec
 
+import com.astralink.terralink.ble.protocol.ConfigPatchMsg
 import com.astralink.terralink.ble.protocol.DataChunkMsg
 import com.astralink.terralink.ble.protocol.MAX_CONTROL_MSG_BYTES
 import com.astralink.terralink.ble.protocol.Op
@@ -9,6 +10,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class CborTest {
@@ -83,5 +85,24 @@ class CborTest {
     fun chunkedDecodeRejectsEmptyInput() {
         val err = assertFailsWith<CodecError> { chunkedDecode(emptyList()) }
         assertTrue(err.message!!.contains("no frames"))
+    }
+
+    @Test
+    fun configPatchOmitsUnchangedNullFields() {
+        // A name-only patch must stay SPARSE: only the changed field (plus the
+        // mandatory v/op) reaches the wire. Otherwise a name save would also
+        // carry `deep_sleep: null` etc., which the firmware can misapply.
+        // CBOR map keys are raw UTF-8, so they appear verbatim in the bytes.
+        val bytes = encodeSparse(ConfigPatchMsg(name = "Parcela 3"))
+        val text = bytes.decodeToString()
+        assertTrue(text.contains("name"), "the changed field must be present")
+        assertTrue(text.contains("op"), "op (forced via @EncodeDefault) must stay on the wire")
+        assertFalse(text.contains("deep_sleep"), "deep_sleep must be omitted when unchanged")
+        assertFalse(text.contains("sleep_s"), "sleep_s must be omitted when unchanged")
+        assertFalse(text.contains("log_level"), "log_level must be omitted when unchanged")
+        // And it still round-trips the fields that ARE present.
+        val back = decode<ConfigPatchMsg>(bytes)
+        assertEquals("Parcela 3", back.name)
+        assertEquals(null, back.deepSleep)
     }
 }
