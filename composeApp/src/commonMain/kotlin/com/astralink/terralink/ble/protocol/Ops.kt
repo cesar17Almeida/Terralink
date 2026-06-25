@@ -13,6 +13,8 @@ object Op {
     const val CLEAR = "clear"            // dev: wipe stored data
     const val MOCK = "mock"              // dev: inject mock data (kind=hs10|hs30|ta reading, or pred forecast)
     const val INGEST = "ingest"          // upsert timestamped points: data:[{ts_ms,kind,value,depth_cm?}]
+    const val LORA = "lora"              // trigger an on-demand LoRa ping (join+uplink); result in status
+    const val AT = "at"                  // raw AT terminal: {cmd?} queues a command, returns {seq,cmd,lines}
 
     // data_response notify chunks
     const val CHUNK = "chunk"

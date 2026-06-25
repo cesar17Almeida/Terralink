@@ -8,7 +8,10 @@ import com.astralink.terralink.ble.codec.decode
 import com.astralink.terralink.ble.codec.encode
 import com.astralink.terralink.ble.codec.encodeSparse
 import com.astralink.terralink.ble.protocol.Aggregation
+import com.astralink.terralink.ble.protocol.AtRequestMsg
+import com.astralink.terralink.ble.protocol.AtResultMsg
 import com.astralink.terralink.ble.protocol.BlobControlEnvelope
+import com.astralink.terralink.ble.protocol.LoraPingRequestMsg
 import com.astralink.terralink.ble.protocol.BlobKind
 import com.astralink.terralink.ble.protocol.BlobStartMsg
 import com.astralink.terralink.ble.protocol.CHR_BLOB_CONTROL_UUID
@@ -44,6 +47,7 @@ import com.astralink.terralink.ble.protocol.TimeSyncMsg
 import com.astralink.terralink.ble.util.sha256
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.first
@@ -108,6 +112,38 @@ class ActiveSession internal constructor(
 
     suspend fun readStatus(): StatusMsg =
         decode(connection.read(CHR_STATUS_UUID))
+
+    /**
+     * Trigger an on-demand LoRa ping (join + one confirmed uplink) on the station.
+     * The station runs it off the BLE thread (it blocks on AT commands), so this
+     * returns on the queued ack; poll [readStatus] afterwards to see the resulting
+     * joined state + downlink RSSI/SNR in StatusMsg.lora.
+     */
+    suspend fun loraPing() {
+        runDataRequest { connection.write(CHR_DATA_REQUEST_UUID, encode(LoraPingRequestMsg())) }
+    }
+
+    /**
+     * Run a raw AT command on the LoRa module (the BLE "AT terminal"). The station
+     * runs it off the BLE thread, so we queue it then poll until its seq advances and
+     * return the captured reply lines. Throws on timeout.
+     */
+    @OptIn(ExperimentalSerializationApi::class)
+    suspend fun atCommand(cmd: String): AtResultMsg {
+        val beforeSeq = runCatching { atRoundtrip(cmd) }.getOrNull()?.seq ?: -1
+        repeat(22) {                                   // ~15 s (covers slow AT like JOIN)
+            delay(700)
+            val r = runCatching { atRoundtrip(null) }.getOrNull()
+            if (r != null && r.seq != beforeSeq) return r
+        }
+        throw CodecError("La estación no respondió al comando AT a tiempo")
+    }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    private suspend fun atRoundtrip(cmd: String?): AtResultMsg {
+        val chunks = runDataRequest { connection.write(CHR_DATA_REQUEST_UUID, encode(AtRequestMsg(cmd = cmd))) }
+        return SaviaCbor.decodeFromByteArray<AtResultMsg>(chunkedDecode(chunks))
+    }
 
     // --- auth (challenge-response) -----------------------------------------
 

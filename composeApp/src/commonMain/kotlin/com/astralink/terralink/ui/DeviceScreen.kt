@@ -48,6 +48,7 @@ import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.StationsRepository
 import com.astralink.terralink.ui.components.BackIconButton
 import com.astralink.terralink.ui.components.ConnectionStatusChip
+import com.astralink.terralink.ui.components.LoraStatusCard
 import com.astralink.terralink.ui.components.PasswordField
 import com.astralink.terralink.ui.components.PremiumTile
 import com.astralink.terralink.ui.components.TerraIcons
@@ -76,6 +77,7 @@ fun DeviceScreen(
     onSyncData: (ActiveSession) -> Unit,
     onViewPredictions: (ActiveSession) -> Unit,
     onConfigure: (ActiveSession) -> Unit,
+    onOpenLora: (ActiveSession) -> Unit,
     onBack: () -> Unit,
 ) {
     var state by remember { mutableStateOf<ConnState>(ConnState.Connecting) }
@@ -90,6 +92,7 @@ fun DeviceScreen(
     LaunchedEffect(currentStation.bleId, retryKey) {
         state = ConnState.Connecting
         authError = null
+        authSubmitting = false // clear stale flag so re-entry into NeedsAuth has an enabled button
         state = try {
             val active = session.connect(currentStation.bleId)
             // Tolerate a firmware/cache without the auth characteristic (older GATT
@@ -128,8 +131,9 @@ fun DeviceScreen(
                         authError = null
                         scope.launch {
                             val ok = runCatching { s.active.authenticate(pw) }.getOrDefault(false)
+                            authSubmitting = false // reset before readyFrom, which may yield Failed
                             if (ok) state = readyFrom(s.active)
-                            else { authError = "Contraseña incorrecta"; authSubmitting = false }
+                            else authError = "Contraseña incorrecta"
                         }
                     },
                 )
@@ -140,6 +144,7 @@ fun DeviceScreen(
                     onSyncData = { onSyncData(s.session) },
                     onViewPredictions = { onViewPredictions(s.session) },
                     onConfigure = { onConfigure(s.session) },
+                    onOpenLora = { onOpenLora(s.session) },
                 )
             }
         }
@@ -239,6 +244,7 @@ private fun ReadyPanel(
     onSyncData: () -> Unit,
     onViewPredictions: () -> Unit,
     onConfigure: () -> Unit,
+    onOpenLora: () -> Unit,
 ) {
     // How many readings the station currently holds (mostly mock data today).
     var readingCount by remember(session) { mutableStateOf<Long?>(null) }
@@ -254,10 +260,12 @@ private fun ReadyPanel(
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         DeviceStatusCard(station = station, status = status, readingCount = readingCount)
+        LoraStatusCard(session = session, initial = status.lora)
         TileGrid(
             onSyncData = onSyncData,
             onViewPredictions = onViewPredictions,
             onConfigure = onConfigure,
+            onOpenLora = onOpenLora,
         )
     }
 }
@@ -267,6 +275,7 @@ private fun TileGrid(
     onSyncData: () -> Unit,
     onViewPredictions: () -> Unit,
     onConfigure: () -> Unit,
+    onOpenLora: () -> Unit,
 ) {
     // Two tiles per row: wider cards so titles/captions no longer truncate.
     // An odd count leaves one empty half-slot on the last row.
@@ -286,7 +295,10 @@ private fun TileGrid(
                 title = "Configurar", caption = "Ajustes", icon = TerraIcons.Settings,
                 onClick = onConfigure, modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.weight(1f))
+            PremiumTile(
+                title = "LoRa", caption = "Consola AT", icon = TerraIcons.Memory,
+                onClick = onOpenLora, modifier = Modifier.weight(1f),
+            )
         }
     }
 }

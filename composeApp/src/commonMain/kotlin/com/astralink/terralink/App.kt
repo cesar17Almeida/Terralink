@@ -13,6 +13,7 @@ import com.astralink.terralink.state.StationsRepository
 import com.astralink.terralink.ui.ConfigurationScreen
 import com.astralink.terralink.ui.DeviceScreen
 import com.astralink.terralink.ui.LogsScreen
+import com.astralink.terralink.ui.LoraConsoleScreen
 import com.astralink.terralink.ui.PredictionsScreen
 import com.astralink.terralink.ui.ScanScreen
 import com.astralink.terralink.ui.SplashScreen
@@ -32,6 +33,7 @@ private sealed interface Screen {
     data class Predictions(val station: SavedStation) : Screen
     data class Configuration(val station: SavedStation) : Screen
     data class Logs(val station: SavedStation) : Screen
+    data class Lora(val station: SavedStation) : Screen
 }
 
 @Composable
@@ -88,6 +90,10 @@ fun App() {
                 onConfigure = { active ->
                     activeSession = active
                     screen = Screen.Configuration(current.station)
+                },
+                onOpenLora = { active ->
+                    activeSession = active
+                    screen = Screen.Lora(current.station)
                 },
                 onBack = {
                     activeSession = null
@@ -159,6 +165,18 @@ fun App() {
                         station = current.station,
                         active = active,
                         onBack = { screen = Screen.Configuration(current.station) },
+                    )
+                }
+            }
+
+            is Screen.Lora -> {
+                val active = activeSession
+                if (active == null) {
+                    screen = Screen.Device(current.station)
+                } else {
+                    LoraConsoleScreen(
+                        active = active,
+                        onBack = { screen = Screen.Device(current.station) },
                     )
                 }
             }

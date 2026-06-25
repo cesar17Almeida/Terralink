@@ -157,6 +157,22 @@ data class BlobControlEnvelope(
 
 // --- status (read or notify on CHR_STATUS_UUID) ------------------------------
 
+/**
+ * LoRa/TTN link state inside StatusMsg. `joined` proves a TTN gateway relayed the
+ * OTAA handshake both ways; rssi/snr are the DOWNLINK signal the node measured from
+ * the last uplink ACK (null until first measured). lastMs is when it was seen.
+ */
+@Serializable
+data class LoraStatus(
+    val inited: Boolean = false,           // module replied to AT (RX/TX + power OK)
+    val joined: Boolean = false,
+    val rssi: Int? = null,                 // dBm (downlink)
+    val snr: Double? = null,               // dB
+    @SerialName("last_ms") val lastMs: Long? = null,
+    val module: String = "",               // module AT+VER reply ("" if it stayed silent)
+    val seq: Int = 0,                      // bumps each completed ping (wait for a fresh one)
+)
+
 @Serializable
 data class StatusMsg(
     val v: Int,
@@ -167,6 +183,32 @@ data class StatusMsg(
     val lastSyncMs: Long? = null,
     @SerialName("weather_updated_ms")
     val weatherUpdatedMs: Long? = null,
+    val lora: LoraStatus? = null,
+)
+
+/** data_request: trigger an on-demand LoRa ping (join + confirmed uplink). The
+ *  result lands in StatusMsg.lora -- poll readStatus() after sending this. */
+@Serializable
+data class LoraPingRequestMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String = Op.LORA,
+)
+
+/** data_request: raw AT terminal. `cmd` non-null queues a command on the module;
+ *  null just polls. The reply lands in [AtResultMsg] (read it back via the same op). */
+@Serializable
+data class AtRequestMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String = Op.AT,
+    val cmd: String? = null,
+)
+
+/** data_response for op "at": the last AT exchange the station ran. */
+@Serializable
+data class AtResultMsg(
+    val seq: Int = 0,
+    val cmd: String = "",
+    val lines: List<String> = emptyList(),
 )
 
 // --- config (read / write / notify on CHR_CONFIG_UUID) -----------------------
