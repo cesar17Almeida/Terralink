@@ -21,6 +21,7 @@ import com.astralink.terralink.ble.protocol.AuthSetMsg
 import com.astralink.terralink.ble.protocol.AuthStateMsg
 import com.astralink.terralink.ble.protocol.CHR_AUTH_UUID
 import com.astralink.terralink.ble.protocol.CHR_CONFIG_UUID
+import com.astralink.terralink.ble.protocol.CHR_PINMAP_UUID
 import com.astralink.terralink.ble.protocol.ClearRequestMsg
 import com.astralink.terralink.ble.protocol.CHR_DATA_REQUEST_UUID
 import com.astralink.terralink.ble.util.authProof
@@ -39,6 +40,7 @@ import com.astralink.terralink.ble.protocol.IngestAckMsg
 import com.astralink.terralink.ble.protocol.IngestMsg
 import com.astralink.terralink.ble.protocol.IngestPoint
 import com.astralink.terralink.ble.protocol.MockRequestMsg
+import com.astralink.terralink.ble.protocol.PinmapMsg
 import com.astralink.terralink.ble.protocol.Op
 import com.astralink.terralink.ble.protocol.Prediction
 import com.astralink.terralink.ble.protocol.Reading
@@ -242,6 +244,10 @@ class ActiveSession internal constructor(
     /** Read the full config snapshot (device card, sleep time, sensors, GPIO map). */
     suspend fun readConfig(): ConfigSnapshotMsg =
         decode(connection.read(CHR_CONFIG_UUID))
+
+    /** Read the GPIO inventory (…0015): which pins are free / in use / reserved + caps. */
+    suspend fun readPinmap(): PinmapMsg =
+        decode(connection.read(CHR_PINMAP_UUID))
 
     /**
      * Apply a config patch (only the changed fields) and read back the resulting

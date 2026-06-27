@@ -222,7 +222,19 @@ data class DeviceInfo(
     val fw: String,
 )
 
-/** One configured sensor slot. */
+/** One installer-labelled channel of a generic SDI-12 sensor. */
+@Serializable
+data class ChannelInfo(
+    val kind: String,                        // "soil_moisture" | "soil_temperature" | "air_temperature"
+    @SerialName("depth_cm") val depthCm: Int = 0,
+)
+
+/**
+ * One configured sensor slot, as the firmware serialises it (…0013). The base
+ * fields are always present; the decoding fields appear per type (analog ->
+ * kind/depth/scale/offset, 1-Wire -> kind/depth, SDI-12 generic -> chan[]). The
+ * extra fields let the wizard re-open a sensor for editing without losing them.
+ */
 @Serializable
 data class SensorInfo(
     val port: Int,
@@ -230,6 +242,11 @@ data class SensorInfo(
     val type: String,                        // e.g. "sdi12_aquacheck"
     val addr: String,
     @SerialName("interval_s") val intervalS: Int = 0,   // per-sensor cadence (s); 0 = follow capture_s
+    val kind: String? = null,                // analog / 1-Wire single-value kind
+    @SerialName("depth_cm") val depthCm: Int? = null,
+    val scale: Double? = null,               // analog_linear: value = scale*raw + offset
+    val offset: Double? = null,
+    val chan: List<ChannelInfo>? = null,     // sdi12_generic: installer-labelled channels
 )
 
 /** Used / free GPIO partition for the pin map. */
@@ -256,11 +273,40 @@ data class ConfigSnapshotMsg(
     val gpio: GpioMap = GpioMap(),                        // reserved for the future pin map
 )
 
+/** One channel for a generic SDI-12 sensor patch (omitted-null = not set). */
+@Serializable
+data class ChannelPatch(
+    val kind: String,
+    @SerialName("depth_cm") val depthCm: Int,
+)
+
+/**
+ * One sensor in a config-patch `sensors[]` table. `gpio`/`type` are always sent;
+ * the rest are per-type and omitted when null (sparse). Mirrors the firmware's
+ * parse_sensor_slot: addr (SDI-12), interval_s (cadence, 0/omitted = global),
+ * kind/depth_cm + scale/offset (analog), kind/depth_cm (1-Wire), chan[] (generic).
+ */
+@Serializable
+data class SensorPatch(
+    val gpio: Int,
+    val type: String,
+    val addr: String? = null,
+    @SerialName("interval_s") val intervalS: Int? = null,
+    val kind: String? = null,
+    @SerialName("depth_cm") val depthCm: Int? = null,
+    val scale: Double? = null,
+    val offset: Double? = null,
+    val chan: List<ChannelPatch>? = null,
+)
+
 /**
  * config WRITE: a SPARSE patch -- only the fields being changed are non-null.
  * Encoded with [encodeSparse] so unchanged (null) fields are omitted from the
  * wire (a name-only save must NOT carry `deep_sleep` etc.). `v`/`op` are kept
  * via @EncodeDefault(ALWAYS) since the firmware requires them.
+ *
+ * `sensors` is a FULL replacement of the sensor table (the firmware swaps the
+ * whole array): send the complete desired list, or null to leave it untouched.
  */
 @OptIn(ExperimentalSerializationApi::class)
 @Serializable
@@ -274,6 +320,24 @@ data class ConfigPatchMsg(
     @SerialName("daily_hour") val dailyHour: Int? = null,
     @SerialName("mock") val mock: Boolean? = null,
     @SerialName("log_level") val logLevel: Int? = null,
+    val sensors: List<SensorPatch>? = null,
+)
+
+/** One pin of the GPIO inventory (…0015). */
+@Serializable
+data class PinEntry(
+    val gpio: Int,
+    val state: String,                       // "free" | "in_use" | "reserved"
+    val reason: String = "",                 // "sensor" | "wireless" | "wake_btn" | "lora_uart" | ""
+    val caps: Int = 0,                       // savia_pin_cap_t bitmask (matches PinCap.*)
+    val port: Int? = null,                   // 1..6 when a sensor occupies it
+)
+
+/** pinmap READ (…0015): used to offer only free + capable pins in the wizard. */
+@Serializable
+data class PinmapMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val pins: List<PinEntry> = emptyList(),
 )
 
 /** data_request: wipe stored data (dev). Replies with {count:0} on data_response. */

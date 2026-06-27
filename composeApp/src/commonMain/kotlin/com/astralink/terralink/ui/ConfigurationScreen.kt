@@ -57,6 +57,8 @@ import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.protocol.ConfigPatchMsg
 import com.astralink.terralink.ble.protocol.ConfigSnapshotMsg
 import com.astralink.terralink.ble.protocol.DeviceInfo
+import com.astralink.terralink.ble.protocol.PinmapMsg
+import com.astralink.terralink.ble.protocol.SensorPatch
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.ReadingsRepository
@@ -106,7 +108,7 @@ fun ConfigurationScreen(
     when (val p = phase) {
         ConfigPhase.Loading -> PlainConfigScaffold(onBack) { CenteredProgress("Leyendo configuración…") }
         is ConfigPhase.Failed -> PlainConfigScaffold(onBack) { ErrorPanel(p.message, onRetry = { reloadKey++ }) }
-        is ConfigPhase.Ready -> ConfigReady(station, p.snapshot, active, onViewLogs, onBack)
+        is ConfigPhase.Ready -> ConfigReady(station, p.snapshot, active, onViewLogs, onBack, onReload = { reloadKey++ })
     }
 }
 
@@ -133,6 +135,7 @@ private fun ConfigReady(
     active: ActiveSession,
     onViewLogs: () -> Unit,
     onBack: () -> Unit,
+    onReload: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -169,6 +172,30 @@ private fun ConfigReady(
     var pwBusy by remember { mutableStateOf(false) }
     var pwError by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(snapshot) { prov = runCatching { active.readAuthState().prov }.getOrNull() }
+
+    // Sensors: the GPIO inventory drives the wizard's pin step; the wizard/delete
+    // send a full-table ConfigPatchMsg and reload so the screen reflects the device.
+    var pinmap by remember { mutableStateOf<PinmapMsg?>(null) }
+    LaunchedEffect(snapshot) { pinmap = runCatching { active.readPinmap() }.getOrNull() }
+    var wizard by remember { mutableStateOf<SensorTarget?>(null) }
+    var savingSensors by remember { mutableStateOf(false) }
+    var sensorError by remember { mutableStateOf<String?>(null) }
+    var confirmDeleteSensor by remember { mutableStateOf<Int?>(null) }
+
+    fun sendSensorTable(table: List<SensorPatch>, onOk: () -> Unit) {
+        savingSensors = true
+        sensorError = null
+        scope.launch {
+            try {
+                active.writeConfig(ConfigPatchMsg(sensors = table))
+                onOk()
+            } catch (e: Throwable) {
+                sensorError = e.message ?: "No se pudo guardar el sensor"
+            } finally {
+                savingSensors = false
+            }
+        }
+    }
 
     val sleepValue = sleepText.trim().toIntOrNull()
     val sleepValid = sleepValue != null && sleepValue in SLEEP_MIN_S..SLEEP_MAX_S
@@ -211,6 +238,21 @@ private fun ConfigReady(
                 saving = false
             }
         }
+    }
+
+    // The sensor wizard takes over the whole screen while open (its own Scaffold).
+    val wizardTarget = wizard
+    if (wizardTarget != null) {
+        SensorWizardScreen(
+            target = wizardTarget,
+            existing = snapshot.sensors,
+            pinmap = pinmap,
+            busy = savingSensors,
+            error = sensorError,
+            onCancel = { wizard = null; sensorError = null },
+            onSave = { table -> sendSensorTable(table) { wizard = null; sensorError = null; onReload() } },
+        )
+        return
     }
 
     Scaffold(
@@ -257,6 +299,17 @@ private fun ConfigReady(
                 onNameChange = { nameText = it.take(BLE_NAME_MAX); error = null },
                 nameValid = nameValid,
             )
+
+            SensorsCard(
+                sensors = snapshot.sensors,
+                busy = savingSensors,
+                onAdd = { sensorError = null; wizard = SensorTarget.New },
+                onEdit = { i -> sensorError = null; wizard = SensorTarget.Edit(i, snapshot.sensors[i]) },
+                onDelete = { i -> confirmDeleteSensor = i },
+            )
+            sensorError?.let {
+                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
 
             DevCard(
                 mockEnabled = mockEnabled,
@@ -308,6 +361,29 @@ private fun ConfigReady(
                 "Se eliminarán las lecturas históricas de esta estación guardadas en este " +
                     "teléfono. Los datos en el dispositivo no se tocan; puedes volver a " +
                     "descargarlas sincronizando.",
+            )
+        }
+    }
+
+    confirmDeleteSensor?.let { idx ->
+        val s = snapshot.sensors.getOrNull(idx)
+        TerraDialog(
+            onDismiss = { confirmDeleteSensor = null },
+            title = "¿Eliminar sensor?",
+            confirmText = "Eliminar",
+            destructive = true,
+            confirmEnabled = !savingSensors,
+            onConfirm = {
+                confirmDeleteSensor = null
+                sendSensorTable(sensorTableWithout(snapshot.sensors, idx)) {
+                    sensorError = null; onReload()
+                }
+            },
+        ) {
+            Text(
+                "Se quitará el sensor del puerto ${s?.port ?: (idx + 1)}" +
+                    (s?.let { " (${sensorTypeLabel(it.type)})" } ?: "") +
+                    ". Puedes volver a añadirlo cuando quieras.",
             )
         }
     }
@@ -542,7 +618,6 @@ private fun StationCard(
     val specs = buildList {
         add(Spec("Captura", "cada ${secondsToHuman(snapshot.captureS)}"))
         add(Spec("Ciclo diario", "${snapshot.dailyHour}:00 UTC"))
-        snapshot.sensors.forEach { s -> add(Spec("Sensor ${s.port}", "GPIO ${s.gpio} · ${s.type}")) }
         add(Spec("Botón", "GPIO ${snapshot.wakeGpio}"))
     }
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
