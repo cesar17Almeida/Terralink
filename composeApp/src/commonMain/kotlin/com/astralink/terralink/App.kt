@@ -176,6 +176,7 @@ fun App() {
                 } else {
                     LoraConsoleScreen(
                         active = active,
+                        stationId = current.station.bleId,
                         onBack = { screen = Screen.Device(current.station) },
                     )
                 }

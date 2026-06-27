@@ -21,6 +21,12 @@ object TerraIcons {
                 "L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z",
         )
     }
+    val Send: ImageVector by lazy {
+        materialIcon(
+            "Send",
+            "M2.01 21L23 12 2.01 3 2 10l15 2-15 2z",
+        )
+    }
     val ShowChart: ImageVector by lazy {
         materialIcon(
             "ShowChart",

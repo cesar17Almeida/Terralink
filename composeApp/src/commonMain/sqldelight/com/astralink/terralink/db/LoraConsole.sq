@@ -1,0 +1,23 @@
+-- Local history of the LoRa AT console chat, per station, with the phone-side
+-- send timestamp. Survives app restarts (same TerralinkDb as the readings cache).
+
+CREATE TABLE LoraMessage (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    station_id TEXT    NOT NULL,
+    ts_ms      INTEGER NOT NULL,   -- phone wall-clock when the line was logged
+    from_user  INTEGER NOT NULL,   -- 1 = sent by the phone, 0 = module reply
+    body       TEXT    NOT NULL,
+    is_error   INTEGER NOT NULL    -- 1 = error reply
+);
+
+CREATE INDEX lora_msg_station ON LoraMessage(station_id, id);
+
+insertMessage:
+INSERT INTO LoraMessage(station_id, ts_ms, from_user, body, is_error)
+VALUES (?, ?, ?, ?, ?);
+
+selectByStation:
+SELECT * FROM LoraMessage WHERE station_id = ? ORDER BY id ASC LIMIT ?;
+
+deleteByStation:
+DELETE FROM LoraMessage WHERE station_id = ?;

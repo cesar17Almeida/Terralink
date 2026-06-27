@@ -1,5 +1,6 @@
 package com.astralink.terralink.ui
 
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -8,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -24,6 +26,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -32,15 +35,20 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.session.ActiveSession
+import com.astralink.terralink.state.AtLogEntry
+import com.astralink.terralink.state.LoraConsoleRepository
+import com.astralink.terralink.util.nowEpochMs
 import com.astralink.terralink.ui.components.BackIconButton
 import com.astralink.terralink.ui.components.TerraIcons
 import com.astralink.terralink.ui.components.TerraTextField
 import kotlinx.coroutines.launch
 
-private data class AtBubble(val fromUser: Boolean, val text: String, val isError: Boolean = false)
+private data class AtBubble(val tsMs: Long, val fromUser: Boolean, val text: String, val isError: Boolean = false)
 
 private val QUICK_CMDS = listOf("AT", "AT+VER", "AT+ID", "AT+MODE=LWOTAA", "AT+DR=EU868", "AT+JOIN")
 
@@ -50,6 +58,7 @@ private val QUICK_CMDS = listOf("AT", "AT+VER", "AT+ID", "AT+MODE=LWOTAA", "AT+D
 @Composable
 fun LoraConsoleScreen(
     active: ActiveSession,
+    stationId: String,
     onBack: () -> Unit,
 ) {
     val bubbles = remember { mutableStateListOf<AtBubble>() }
@@ -57,20 +66,37 @@ fun LoraConsoleScreen(
     var sending by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val focusManager = LocalFocusManager.current
+
+    // Load the persisted history once, on first open.
+    LaunchedEffect(stationId) {
+        if (bubbles.isEmpty()) {
+            LoraConsoleRepository.history(stationId).forEach {
+                bubbles.add(AtBubble(it.tsMs, it.fromUser, it.body, it.isError))
+            }
+            if (bubbles.isNotEmpty()) listState.scrollToItem(bubbles.lastIndex)
+        }
+    }
+
+    // Add a bubble to the view AND persist it with its send timestamp.
+    fun log(b: AtBubble) {
+        bubbles.add(b)
+        LoraConsoleRepository.append(stationId, AtLogEntry(b.tsMs, b.fromUser, b.text, b.isError))
+    }
 
     fun send(cmd: String) {
         val c = cmd.trim()
         if (c.isEmpty() || sending) return
-        bubbles.add(AtBubble(fromUser = true, text = c))
+        log(AtBubble(nowEpochMs(), fromUser = true, text = c))
         input = ""
         sending = true
         scope.launch {
             try {
                 val res = active.atCommand(c)
                 val reply = res.lines.joinToString("\n").ifBlank { "(sin respuesta)" }
-                bubbles.add(AtBubble(fromUser = false, text = reply))
+                log(AtBubble(nowEpochMs(), fromUser = false, text = reply))
             } catch (e: Throwable) {
-                bubbles.add(AtBubble(fromUser = false, text = e.message ?: "Error", isError = true))
+                log(AtBubble(nowEpochMs(), fromUser = false, text = e.message ?: "Error", isError = true))
             } finally {
                 sending = false
                 listState.animateScrollToItem(bubbles.lastIndex.coerceAtLeast(0))
@@ -87,7 +113,15 @@ fun LoraConsoleScreen(
             )
         },
     ) { inner ->
-        Column(modifier = Modifier.fillMaxSize().padding(inner)) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(inner)
+                .imePadding()                         // keep the input above the keyboard
+                .pointerInput(Unit) {                 // tap anywhere to dismiss the keyboard
+                    detectTapGestures(onTap = { focusManager.clearFocus() })
+                },
+        ) {
             // Conversation
             LazyColumn(
                 modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp),
@@ -144,7 +178,7 @@ fun LoraConsoleScreen(
                 )
                 IconButton(onClick = { send(input) }, enabled = !sending && input.isNotBlank()) {
                     Icon(
-                        imageVector = TerraIcons.Sync,
+                        imageVector = TerraIcons.Send,
                         contentDescription = "Enviar",
                         tint = if (!sending && input.isNotBlank()) MaterialTheme.colorScheme.primary
                         else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -171,18 +205,33 @@ private fun Bubble(b: AtBubble) {
         modifier = Modifier.fillMaxWidth(),
         contentAlignment = if (b.fromUser) Alignment.CenterEnd else Alignment.CenterStart,
     ) {
-        Surface(
-            color = bg,
-            shape = RoundedCornerShape(14.dp),
-            modifier = Modifier.widthIn(max = 300.dp),
-        ) {
+        Column(horizontalAlignment = if (b.fromUser) Alignment.End else Alignment.Start) {
+            Surface(
+                color = bg,
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.widthIn(max = 300.dp),
+            ) {
+                Text(
+                    text = b.text,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = fg,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+            }
             Text(
-                text = b.text,
-                style = MaterialTheme.typography.bodyMedium,
-                color = fg,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                text = clockUtc(b.tsMs),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp, start = 6.dp, end = 6.dp),
             )
         }
     }
+}
+
+// HH:mm:ss (UTC) from epoch ms, without a kotlinx-datetime dependency.
+private fun clockUtc(ms: Long): String {
+    val s = (ms / 1000) % 86400
+    fun p(n: Long) = n.toString().padStart(2, '0')
+    return "${p(s / 3600)}:${p((s % 3600) / 60)}:${p(s % 60)}"
 }
