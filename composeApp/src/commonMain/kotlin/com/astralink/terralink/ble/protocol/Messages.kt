@@ -229,6 +229,7 @@ data class SensorInfo(
     val gpio: Int,
     val type: String,                        // e.g. "sdi12_aquacheck"
     val addr: String,
+    @SerialName("interval_s") val intervalS: Int = 0,   // per-sensor cadence (s); 0 = follow capture_s
 )
 
 /** Used / free GPIO partition for the pin map. */
