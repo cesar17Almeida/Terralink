@@ -1,0 +1,17 @@
+-- v1 -> v2: add the LoRa AT console history table.
+--
+-- The LoRa console persistence shipped after the first release, so databases
+-- created at schema v1 only have `Reading` and crash on the console's first
+-- query ("no such table: LoraMessage"). Fresh installs get this table from the
+-- generated Schema.create; this migration brings existing installs up to v2.
+-- IF NOT EXISTS keeps it safe if the table happens to already be present.
+CREATE TABLE IF NOT EXISTS LoraMessage (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    station_id TEXT    NOT NULL,
+    ts_ms      INTEGER NOT NULL,
+    from_user  INTEGER NOT NULL,
+    body       TEXT    NOT NULL,
+    is_error   INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS lora_msg_station ON LoraMessage(station_id, id);
