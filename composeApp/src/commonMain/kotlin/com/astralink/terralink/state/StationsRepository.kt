@@ -89,6 +89,20 @@ object StationsRepository {
         }
     }
 
+    /** Stamp the last on-demand LoRa ping so the UI can rate-limit uplinks. */
+    fun updateLastLoraPing(bleId: String, ms: Long) {
+        requireInitialized()
+        ioScope.launch {
+            store.edit { prefs ->
+                val current = decode(prefs[key])
+                val updated = current.map {
+                    if (it.bleId == bleId) it.copy(lastLoraPingMs = ms) else it
+                }
+                prefs[key] = json.encodeToString(updated)
+            }
+        }
+    }
+
     private fun decode(raw: String?): List<SavedStation> {
         if (raw.isNullOrEmpty()) return emptyList()
         return runCatching { json.decodeFromString<List<SavedStation>>(raw) }

@@ -18,4 +18,6 @@ data class SavedStation(
     val pairedAtMs: Long,
     /** Epoch ms of the last successful sync; null if never synced. */
     val lastSyncMs: Long? = null,
+    /** Epoch ms of the last on-demand LoRa ping (rate-limits uplinks); null if never. */
+    val lastLoraPingMs: Long? = null,
 )

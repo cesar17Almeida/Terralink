@@ -1,0 +1,11 @@
+-- v2 -> v3: add the `channel` column so the SDI-12 probe console can persist its
+-- history alongside the LoRa AT console against the same station.
+--
+-- Existing rows are all LoRa AT history, so DEFAULT 'lora' back-fills them correctly.
+-- Fresh installs get the column straight from the generated Schema.create; this
+-- migration brings v2 installs up to v3 (the JVM driver migrates by hand).
+ALTER TABLE LoraMessage ADD COLUMN channel TEXT NOT NULL DEFAULT 'lora';
+
+-- Widen the lookup index to include the channel, matching the fresh schema.
+DROP INDEX IF EXISTS lora_msg_station;
+CREATE INDEX lora_msg_station ON LoraMessage(station_id, channel, id);

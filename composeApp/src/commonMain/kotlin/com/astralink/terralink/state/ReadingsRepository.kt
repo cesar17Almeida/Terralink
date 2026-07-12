@@ -50,6 +50,25 @@ object ReadingsRepository {
     fun countByStation(stationId: String): Long =
         requireDb().readingsQueries.countByStation(stationId).executeAsOne()
 
+    /** How many readings are cached for one sensor (by its physical port). */
+    fun countByStationPort(stationId: String, port: Int): Long =
+        requireDb().readingsQueries.countByStationPort(stationId, port.toLong()).executeAsOne()
+
+    /** Newest-first history for one sensor (by physical port), across all its kinds/depths. */
+    fun selectByStationPort(stationId: String, port: Int, limit: Long = 5_000): List<Reading> =
+        requireDb().readingsQueries
+            .selectByStationPort(station_id = stationId, port = port.toLong(), value_ = limit)
+            .executeAsList()
+            .map { row ->
+                Reading(
+                    tsMs = row.ts_ms,
+                    port = row.port.toInt(),
+                    kind = row.kind,
+                    value = row.value_,
+                    depthCm = row.depth_cm?.toInt()?.takeIf { it >= 0 },   // sentinel -> null
+                )
+            }
+
     /** Highest ts_ms cached for the station, or null if no rows yet. */
     fun maxTsByStation(stationId: String): Long? =
         requireDb().readingsQueries.maxTsByStation(stationId).executeAsOne().MAX

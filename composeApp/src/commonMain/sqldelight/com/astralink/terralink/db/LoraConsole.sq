@@ -1,23 +1,26 @@
--- Local history of the LoRa AT console chat, per station, with the phone-side
--- send timestamp. Survives app restarts (same TerralinkDb as the readings cache).
+-- Local history of the console chats, per station and per channel, with the phone-side
+-- send timestamp. Survives app restarts (same TerralinkDb as the readings cache). The
+-- `channel` column separates the LoRa AT console ('lora') from the SDI-12 probe
+-- console ('sdi12') so both persist independently against the same station.
 
 CREATE TABLE LoraMessage (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     station_id TEXT    NOT NULL,
+    channel    TEXT    NOT NULL DEFAULT 'lora',  -- 'lora' | 'sdi12'
     ts_ms      INTEGER NOT NULL,   -- phone wall-clock when the line was logged
     from_user  INTEGER NOT NULL,   -- 1 = sent by the phone, 0 = module reply
     body       TEXT    NOT NULL,
     is_error   INTEGER NOT NULL    -- 1 = error reply
 );
 
-CREATE INDEX lora_msg_station ON LoraMessage(station_id, id);
+CREATE INDEX lora_msg_station ON LoraMessage(station_id, channel, id);
 
 insertMessage:
-INSERT INTO LoraMessage(station_id, ts_ms, from_user, body, is_error)
-VALUES (?, ?, ?, ?, ?);
+INSERT INTO LoraMessage(station_id, channel, ts_ms, from_user, body, is_error)
+VALUES (?, ?, ?, ?, ?, ?);
 
 selectByStation:
-SELECT * FROM LoraMessage WHERE station_id = ? ORDER BY id ASC LIMIT ?;
+SELECT * FROM LoraMessage WHERE station_id = ? AND channel = ? ORDER BY id ASC LIMIT ?;
 
 deleteByStation:
-DELETE FROM LoraMessage WHERE station_id = ?;
+DELETE FROM LoraMessage WHERE station_id = ? AND channel = ?;

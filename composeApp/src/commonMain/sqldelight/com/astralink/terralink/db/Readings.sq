@@ -21,6 +21,18 @@ VALUES (?, ?, ?, ?, ?, ?);
 countByStation:
 SELECT COUNT(*) FROM Reading WHERE station_id = ?;
 
+countByStationPort:
+SELECT COUNT(*) FROM Reading WHERE station_id = ? AND port = ?;
+
+-- Newest-first history for one sensor (identified by its physical port).
+selectByStationPort:
+SELECT *
+FROM Reading
+WHERE station_id = ?
+  AND port = ?
+ORDER BY ts_ms DESC
+LIMIT ?;
+
 maxTsByStation:
 SELECT MAX(ts_ms) FROM Reading WHERE station_id = ?;
 
