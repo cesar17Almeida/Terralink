@@ -55,6 +55,8 @@ internal class IosBleManager : NSObject(), CBCentralManagerDelegateProtocol {
     private val pendingConnects: MutableMap<String, CancellableContinuation<CBPeripheral>> = mutableMapOf()
     // Keep a strong reference to peripherals we want to interact with; CoreBluetooth otherwise discards them.
     private val activePeripherals: MutableMap<String, CBPeripheral> = mutableMapOf()
+    // Per-peripheral delegates so disconnect can fail their pending continuations.
+    private val peripheralDelegates: MutableMap<String, IosPeripheralDelegate> = mutableMapOf()
 
     fun registerPendingConnect(peripheralId: String, cont: CancellableContinuation<CBPeripheral>) {
         pendingConnects[peripheralId] = cont
@@ -62,6 +64,10 @@ internal class IosBleManager : NSObject(), CBCentralManagerDelegateProtocol {
 
     fun cancelPendingConnect(peripheralId: String) {
         pendingConnects.remove(peripheralId)
+    }
+
+    fun registerDelegate(peripheralId: String, delegate: IosPeripheralDelegate) {
+        peripheralDelegates[peripheralId] = delegate
     }
 
     fun retain(peripheral: CBPeripheral) {
@@ -134,10 +140,14 @@ internal class IosBleManager : NSObject(), CBCentralManagerDelegateProtocol {
         error: NSError?,
     ) {
         val id = didDisconnectPeripheral.identifier.UUIDString
+        val reason = "disconnected: ${error?.localizedDescription ?: "unknown"}"
         // Surface to any pending connect (e.g. timed out mid-connect).
         pendingConnects.remove(id)?.takeIf { it.isActive }?.resumeWithException(
-            BleError.Disconnected("disconnected: ${error?.localizedDescription ?: "unknown"}")
+            BleError.Disconnected(reason)
         )
+        // Fail any per-peripheral continuation that would otherwise never resume
+        // (no further delegate callback fires for this peripheral after disconnect).
+        peripheralDelegates.remove(id)?.failPending(BleError.Disconnected(reason))
         forget(id)
     }
 }
@@ -168,7 +178,21 @@ internal class IosPeripheralDelegate : NSObject(), CBPeripheralDelegateProtocol 
             MutableSharedFlow(extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
         }
 
+    /** Resume every outstanding continuation with [error]; called on disconnect. */
+    fun failPending(error: BleError) {
+        pendingDiscoverServices?.takeIf { it.isActive }?.resumeWithException(error)
+        pendingDiscoverServices = null
+        pendingRead?.takeIf { it.isActive }?.resumeWithException(error)
+        pendingRead = null
+        pendingWrite?.takeIf { it.isActive }?.resumeWithException(error)
+        pendingWrite = null
+        pendingL2cap?.takeIf { it.isActive }?.resumeWithException(error)
+        pendingL2cap = null
+    }
+
     override fun peripheral(peripheral: CBPeripheral, didDiscoverServices: NSError?) {
+        // Self-register so the central manager can fail our pending work on disconnect.
+        IosBle.registerDelegate(peripheral.identifier.UUIDString, this)
         val cont = pendingDiscoverServices ?: return
         pendingDiscoverServices = null
         if (didDiscoverServices != null) {
@@ -232,6 +256,22 @@ internal class IosPeripheralDelegate : NSObject(), CBPeripheralDelegateProtocol 
         if (cont == null || !cont.isActive) return
         if (error != null) cont.resumeWithException(BleError.IoError("write: ${error.localizedDescription}"))
         else cont.resume(Unit)
+    }
+
+    @ObjCSignatureOverride
+    override fun peripheral(
+        peripheral: CBPeripheral,
+        didUpdateNotificationStateForCharacteristic: CBCharacteristic,
+        error: NSError?,
+    ) {
+        // A failed CCCD subscribe would otherwise be invisible -- the collector
+        // just times out waiting for notifications. Surface it so it's diagnosable.
+        if (error != null) {
+            println(
+                "BLE: setNotifyValue failed for ${didUpdateNotificationStateForCharacteristic.UUID.UUIDString}: " +
+                    error.localizedDescription,
+            )
+        }
     }
 
     override fun peripheral(

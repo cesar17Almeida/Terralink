@@ -27,8 +27,14 @@ const val ATT_MTU_TARGET: Int = 247
 // CBOR data_response `p` field max bytes per notify.
 const val DATA_CHUNK_BYTES: Int = 200
 
-// Hard ceiling for a single GATT control write/notify payload.
+// Hard ceiling for a single GATT control write/notify payload (the firmware's
+// RX buffer). Outbound encodes are bounded by this.
 const val MAX_CONTROL_MSG_BYTES: Int = 512
+
+// Inbound GATT READS (status / config / pinmap) can be larger than a single
+// control write: the platform reassembles them via ATT long reads. The pinmap
+// alone is ~760 B. Bound the decode path here instead of the write ceiling.
+const val MAX_READ_MSG_BYTES: Int = 4096
 
 // Max single-transfer blob size. Anything larger is refused.
 const val MAX_BLOB_BYTES: Long = 256L * 1024 * 1024  // 256 MB

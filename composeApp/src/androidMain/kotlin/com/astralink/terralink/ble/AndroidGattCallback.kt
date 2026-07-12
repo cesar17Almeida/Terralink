@@ -24,6 +24,13 @@ import kotlin.coroutines.resumeWithException
  */
 internal class AndroidGattCallback : BluetoothGattCallback() {
 
+    companion object {
+        // Negotiate the largest practical ATT MTU so control writes (32-byte
+        // @ByteString fields, ~158-byte ingest batches) fit in one write; the
+        // Android default of 23 leaves only 20 usable payload bytes.
+        const val ATT_MTU_TARGET = 247
+    }
+
     var gatt: BluetoothGatt? = null
     var device: BluetoothDevice? = null
 
@@ -32,18 +39,18 @@ internal class AndroidGattCallback : BluetoothGattCallback() {
     var pendingWrite: CancellableContinuation<Unit>? = null
     var pendingDescriptorWrite: CancellableContinuation<Unit>? = null
 
-    private val notifyFlows = mutableMapOf<String, MutableSharedFlow<ByteArray>>()
+    // ConcurrentHashMap so onCharacteristicChanged (Binder thread) reads are safe
+    // against getOrPut writes from the constructing coroutine thread.
+    private val notifyFlows = java.util.concurrent.ConcurrentHashMap<String, MutableSharedFlow<ByteArray>>()
 
     fun notificationFlow(uuid: String): Flow<ByteArray> {
         val key = uuid.lowercase()
-        val flow = synchronized(notifyFlows) {
-            notifyFlows.getOrPut(key) {
-                MutableSharedFlow(
-                    replay = 0,
-                    extraBufferCapacity = 64,
-                    onBufferOverflow = BufferOverflow.DROP_OLDEST,
-                )
-            }
+        val flow = notifyFlows.getOrPut(key) {
+            MutableSharedFlow(
+                replay = 0,
+                extraBufferCapacity = 64,
+                onBufferOverflow = BufferOverflow.DROP_OLDEST,
+            )
         }
         return flow.asSharedFlow()
     }
@@ -69,16 +76,38 @@ internal class AndroidGattCallback : BluetoothGattCallback() {
 
     override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
         val cont = pendingConnect
+        if (cont == null || !cont.isActive) {
+            pendingConnect = null
+            return
+        }
+        val dev = device
+        if (status != BluetoothGatt.GATT_SUCCESS) {
+            pendingConnect = null
+            cont.resumeWithException(BleError.GattError("service discovery failed", status))
+        } else if (dev == null) {
+            pendingConnect = null
+            cont.resumeWithException(BleError.IoError("device handle missing on connect"))
+        } else {
+            // Negotiate MTU before completing connect; resume happens in onMtuChanged.
+            // If the request can't be issued, resume now rather than hang the handshake.
+            if (!g.requestMtu(ATT_MTU_TARGET)) finishConnect(g)
+        }
+    }
+
+    override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+        // MTU outcome is best-effort: complete connect regardless of negotiated size.
+        finishConnect(g)
+    }
+
+    // Resumes the connect continuation with a ready SaviaConnection. Idempotent:
+    // clears pendingConnect so a late onMtuChanged after timeout/cancel is a no-op.
+    private fun finishConnect(g: BluetoothGatt) {
+        val cont = pendingConnect
         pendingConnect = null
         if (cont == null || !cont.isActive) return
         val dev = device
-        if (status != BluetoothGatt.GATT_SUCCESS) {
-            cont.resumeWithException(BleError.GattError("service discovery failed", status))
-        } else if (dev == null) {
-            cont.resumeWithException(BleError.IoError("device handle missing on connect"))
-        } else {
-            cont.resume(SaviaConnection(g, this, dev))
-        }
+        if (dev == null) cont.resumeWithException(BleError.IoError("device handle missing on connect"))
+        else cont.resume(SaviaConnection(g, this, dev))
     }
 
     // API 33+ overload (preferred). The value lands here without needing to read it back off the characteristic.

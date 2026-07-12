@@ -1,6 +1,7 @@
 package com.astralink.terralink.ble.codec
 
 import com.astralink.terralink.ble.protocol.MAX_CONTROL_MSG_BYTES
+import com.astralink.terralink.ble.protocol.MAX_READ_MSG_BYTES
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.cbor.Cbor
@@ -67,9 +68,21 @@ inline fun <reified T> encodeSparse(msg: T): ByteArray {
 
 @OptIn(ExperimentalSerializationApi::class)
 inline fun <reified T> decode(data: ByteArray): T {
-    if (data.size > MAX_CONTROL_MSG_BYTES) {
+    // An empty read means the station answered with a zero-length value (old
+    // firmware that doesn't populate the characteristic, or a stale iOS GATT
+    // cache after reflashing). CBOR would throw a cryptic non-SerializationException
+    // "Unexpected EOF" that escapes the catch below, so reject it up front.
+    if (data.isEmpty()) {
         throw CodecError(
-            "incoming message is ${data.size} B, exceeds MAX_CONTROL_MSG_BYTES=$MAX_CONTROL_MSG_BYTES"
+            "La estación devolvió una respuesta vacía (0 B). Reflashea la última " +
+                "versión de savia_c; en iOS apaga y enciende el Bluetooth (o \"Olvidar " +
+                "este dispositivo\") para refrescar la caché GATT."
+        )
+    }
+    // Reads (pinmap/config) arrive reassembled and can exceed the write ceiling.
+    if (data.size > MAX_READ_MSG_BYTES) {
+        throw CodecError(
+            "incoming message is ${data.size} B, exceeds MAX_READ_MSG_BYTES=$MAX_READ_MSG_BYTES"
         )
     }
     return try {

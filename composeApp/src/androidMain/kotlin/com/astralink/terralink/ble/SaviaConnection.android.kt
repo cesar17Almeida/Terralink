@@ -89,23 +89,26 @@ actual class SaviaConnection internal constructor(
 
     actual fun notifications(characteristicUuid: String): Flow<ByteArray> {
         val char = findCharacteristic(characteristicUuid)
-        // The Flow itself is hot/shared in the callback. Side-effect-only enable here;
-        // any error writing the CCCD will be visible the next time the caller writes /
-        // reads, since notifications would simply not arrive.
-        gatt.setCharacteristicNotification(char, true)
+        // The Flow itself is hot/shared in the callback. Enable is side-effect-only
+        // here (the contract keeps notifications() non-suspend so ActiveSession can
+        // bind it from a property initializer), but a failed/absent CCCD write must
+        // surface now -- otherwise the subscribe silently never enables.
+        if (!gatt.setCharacteristicNotification(char, true)) {
+            throw BleError.IoError("setCharacteristicNotification($characteristicUuid) returned false")
+        }
         val cccd = char.getDescriptor(CCCD_UUID)
-        if (cccd != null) {
-            val enable = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                gatt.writeDescriptor(cccd, enable)
-            } else {
-                @Suppress("DEPRECATION") run {
-                    cccd.value = enable
-                    @Suppress("DEPRECATION")
-                    gatt.writeDescriptor(cccd)
-                }
+            ?: throw BleError.IoError("characteristic $characteristicUuid has no CCCD descriptor")
+        val enable = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+        val failure: String? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val rc = gatt.writeDescriptor(cccd, enable)
+            if (rc == BluetoothStatusCodes.SUCCESS) null else "writeDescriptor rc=$rc"
+        } else {
+            @Suppress("DEPRECATION") run {
+                cccd.value = enable
+                if (gatt.writeDescriptor(cccd)) null else "writeDescriptor returned false"
             }
         }
+        if (failure != null) throw BleError.IoError("enable notify $characteristicUuid: $failure")
         return callback.notificationFlow(characteristicUuid)
     }
 

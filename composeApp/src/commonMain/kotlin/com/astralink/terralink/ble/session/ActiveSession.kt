@@ -8,8 +8,11 @@ import com.astralink.terralink.ble.codec.decode
 import com.astralink.terralink.ble.codec.encode
 import com.astralink.terralink.ble.codec.encodeSparse
 import com.astralink.terralink.ble.protocol.Aggregation
+import com.astralink.terralink.ble.protocol.ActuatorRequestMsg
 import com.astralink.terralink.ble.protocol.AtRequestMsg
 import com.astralink.terralink.ble.protocol.AtResultMsg
+import com.astralink.terralink.ble.protocol.ConfigClearCoordsMsg
+import com.astralink.terralink.ble.protocol.Sdi12RequestMsg
 import com.astralink.terralink.ble.protocol.BlobControlEnvelope
 import com.astralink.terralink.ble.protocol.LoraPingRequestMsg
 import com.astralink.terralink.ble.protocol.BlobKind
@@ -147,6 +150,36 @@ class ActiveSession internal constructor(
         return SaviaCbor.decodeFromByteArray<AtResultMsg>(chunkedDecode(chunks))
     }
 
+    /**
+     * Raw SDI-12 console: send `cmd` to the probe wired on `gpio` and return its reply
+     * lines. Same queue-then-poll pattern as [atCommand] -- the station runs the blocking
+     * SDI-12 exchange off the BLE thread, so we poll until its seq advances. Throws on timeout.
+     */
+    @OptIn(ExperimentalSerializationApi::class)
+    suspend fun sdi12Command(gpio: Int, cmd: String): AtResultMsg {
+        val beforeSeq = runCatching { sdi12Roundtrip(gpio, cmd) }.getOrNull()?.seq ?: -1
+        repeat(22) {                                   // ~15 s (SDI-12 measure cycles are slow)
+            delay(700)
+            val r = runCatching { sdi12Roundtrip(gpio, null) }.getOrNull()
+            if (r != null && r.seq != beforeSeq) return r
+        }
+        throw CodecError("La estación no respondió al comando SDI-12 a tiempo")
+    }
+
+    @OptIn(ExperimentalSerializationApi::class)
+    private suspend fun sdi12Roundtrip(gpio: Int, cmd: String?): AtResultMsg {
+        val chunks = runDataRequest {
+            connection.write(CHR_DATA_REQUEST_UUID, encode(Sdi12RequestMsg(gpio = gpio, cmd = cmd)))
+        }
+        return SaviaCbor.decodeFromByteArray<AtResultMsg>(chunkedDecode(chunks))
+    }
+
+    /** Drive a digital actuator slot ON/OFF (auth-gated). Poll [readStatus] afterwards
+     *  to see the applied state in StatusMsg.act. */
+    suspend fun setActuator(port: Int, on: Boolean) {
+        runDataRequest { connection.write(CHR_DATA_REQUEST_UUID, encode(ActuatorRequestMsg(port = port, on = on))) }
+    }
+
     // --- auth (challenge-response) -----------------------------------------
 
     /** Read the auth state: whether a password is set + whether we're authenticated, + the nonce. */
@@ -257,6 +290,16 @@ class ActiveSession internal constructor(
         // Sparse encode: only the changed fields travel, so a name-only save
         // doesn't carry deep_sleep/sleep_s/etc. (which the firmware could misapply).
         connection.write(CHR_CONFIG_UUID, encodeSparse(patch))
+        return readConfig()
+    }
+
+    /**
+     * Clear the station's stored coordinates. Sends explicit CBOR `lat: null`/`lon: null`
+     * (which the firmware reads as "clear") via [ConfigClearCoordsMsg] -- a normal sparse
+     * patch can't express this because it omits null fields. Reads the snapshot back.
+     */
+    suspend fun clearCoords(): ConfigSnapshotMsg {
+        connection.write(CHR_CONFIG_UUID, encodeSparse(ConfigClearCoordsMsg()))
         return readConfig()
     }
 

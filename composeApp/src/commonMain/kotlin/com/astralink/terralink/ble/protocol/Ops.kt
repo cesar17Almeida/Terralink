@@ -15,6 +15,8 @@ object Op {
     const val INGEST = "ingest"          // upsert timestamped points: data:[{ts_ms,kind,value,depth_cm?}]
     const val LORA = "lora"              // trigger an on-demand LoRa ping (join+uplink); result in status
     const val AT = "at"                  // raw AT terminal: {cmd?} queues a command, returns {seq,cmd,lines}
+    const val SDI12 = "sdi12"            // raw SDI-12 console: {cmd,gpio} queues, returns {seq,cmd,lines}
+    const val ACT = "act"                // drive a digital actuator slot: {port,on} (auth-gated)
 
     // data_response notify chunks
     const val CHUNK = "chunk"

@@ -68,6 +68,13 @@ actual class BleClient {
         peripheral.delegate = periphDelegate
         suspendCancellableCoroutine<Unit> { cont ->
             periphDelegate.pendingDiscoverServices = cont
+            // Mirror the connect step: on cancellation (e.g. caller timeout) drop
+            // the pending continuation and tear down the link so it cannot leak.
+            cont.invokeOnCancellation {
+                periphDelegate.pendingDiscoverServices = null
+                IosBle.central.cancelPeripheralConnection(peripheral)
+                IosBle.forget(peripheral.identifier.UUIDString)
+            }
             peripheral.discoverServices(listOf(CBUUID.UUIDWithString(SAVIA_SERVICE_UUID)))
         }
 

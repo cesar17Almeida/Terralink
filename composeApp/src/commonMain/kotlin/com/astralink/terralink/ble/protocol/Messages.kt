@@ -173,10 +173,21 @@ data class LoraStatus(
     val seq: Int = 0,                      // bumps each completed ping (wait for a fresh one)
 )
 
+/** One digital actuator slot's live state (StatusMsg.act[]). Parsed tolerantly:
+ *  older firmware omits `act` entirely. */
+@Serializable
+data class ActuatorState(
+    val port: Int,
+    val gpio: Int? = null,
+    val on: Boolean = false,
+)
+
 @Serializable
 data class StatusMsg(
     val v: Int,
     val fw: String,
+    val mode: String? = null,                            // inference mode: "local" | "forward"
+    @SerialName("irrigation_hour") val irrigationHour: Int? = null,   // local watering hour
     @SerialName("uptime_s")
     val uptimeS: Long,
     @SerialName("last_sync_ms")
@@ -184,6 +195,27 @@ data class StatusMsg(
     @SerialName("weather_updated_ms")
     val weatherUpdatedMs: Long? = null,
     val lora: LoraStatus? = null,
+    val act: List<ActuatorState>? = null,                // configured digital actuator slots
+)
+
+/** data_request: drive a digital actuator slot ON/OFF (auth-gated, like config). The
+ *  station replies on data_response; poll [StatusMsg.act] afterwards for the new state. */
+@Serializable
+data class ActuatorRequestMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String = Op.ACT,
+    val port: Int,
+    val on: Boolean,
+)
+
+/** data_request: raw SDI-12 console. `cmd` non-null queues a command on the probe wired
+ *  to `gpio`; null just polls. Reply lands in [AtResultMsg] (same shape as op "at"). */
+@Serializable
+data class Sdi12RequestMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String = Op.SDI12,
+    val cmd: String? = null,
+    val gpio: Int,
 )
 
 /** data_request: trigger an on-demand LoRa ping (join + confirmed uplink). The
@@ -247,6 +279,8 @@ data class SensorInfo(
     val scale: Double? = null,               // analog_linear: value = scale*raw + offset
     val offset: Double? = null,
     val chan: List<ChannelInfo>? = null,     // sdi12_generic: installer-labelled channels
+    @SerialName("gpio2") val gpio2: Int? = null,   // second pin (HC-SR04 echo); absent = single-pin
+    val unit: String? = null,                // free-text unit label (generic sensors); <= 8 chars
 )
 
 /** Used / free GPIO partition for the pin map. */
@@ -269,6 +303,13 @@ data class ConfigSnapshotMsg(
     @SerialName("mock") val mockEnabled: Boolean = true, // dev: mock data generator
     @SerialName("log_level") val logLevel: Int = 1,      // 0=debug, 1=info
     @SerialName("wake_gpio") val wakeGpio: Int,
+    @SerialName("lora_period_s") val loraPeriodS: Int = 3600,     // LoRa uplink cadence (s)
+    @SerialName("inference_mode") val inferenceMode: String = "forward", // "local" | "forward"
+    @SerialName("infer_dev") val inferDev: Boolean = false,       // build supports on-device inference (RO)
+    @SerialName("utc_offset_min") val utcOffsetMin: Int = 0,      // station's local UTC offset (may be negative)
+    @SerialName("irrigation_hour") val irrigationHour: Int = 6,   // local hour the scheduler waters
+    val lat: Double? = null,                             // station coordinates (null = unset)
+    val lon: Double? = null,
     val sensors: List<SensorInfo> = emptyList(),
     val gpio: GpioMap = GpioMap(),                        // reserved for the future pin map
 )
@@ -297,6 +338,8 @@ data class SensorPatch(
     val scale: Double? = null,
     val offset: Double? = null,
     val chan: List<ChannelPatch>? = null,
+    @SerialName("gpio2") val gpio2: Int? = null,   // second pin (HC-SR04 echo); null = single-pin
+    val unit: String? = null,                      // free-text unit label; null omitted
 )
 
 /**
@@ -320,7 +363,31 @@ data class ConfigPatchMsg(
     @SerialName("daily_hour") val dailyHour: Int? = null,
     @SerialName("mock") val mock: Boolean? = null,
     @SerialName("log_level") val logLevel: Int? = null,
+    @SerialName("lora_period_s") val loraPeriodS: Int? = null,
+    @SerialName("inference_mode") val inferenceMode: String? = null,   // "local" | "forward"
+    @SerialName("utc_offset_min") val utcOffsetMin: Int? = null,       // may be negative
+    @SerialName("irrigation_hour") val irrigationHour: Int? = null,
+    // Coords: send lat + lon TOGETHER as numbers to set. Both stay null here (and are
+    // omitted by the sparse encoder) when unchanged -- CLEARING requires explicit CBOR
+    // nulls, which the sparse encoder can't emit, so use [ConfigClearCoordsMsg] instead.
+    val lat: Double? = null,
+    val lon: Double? = null,
     val sensors: List<SensorPatch>? = null,
+)
+
+/**
+ * config WRITE: clear the station's stored coordinates. The firmware distinguishes an
+ * ABSENT `lat`/`lon` key (leave untouched) from a PRESENT CBOR null (clear), but the
+ * sparse encoder drops nulls -- so this dedicated message forces `lat`/`lon` onto the
+ * wire as explicit nulls via @EncodeDefault(ALWAYS). Encode it with [encodeSparse].
+ */
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable
+data class ConfigClearCoordsMsg(
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS) val v: Int = PROTOCOL_VERSION,
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS) val op: String = Op.SET_CONFIG,
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS) val lat: Double? = null,
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS) val lon: Double? = null,
 )
 
 /** One pin of the GPIO inventory (…0015). */
