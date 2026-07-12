@@ -1,6 +1,5 @@
 package com.astralink.terralink.ui
 
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -35,8 +34,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.session.ActiveSession
@@ -46,6 +43,7 @@ import com.astralink.terralink.util.nowEpochMs
 import com.astralink.terralink.ui.components.BackIconButton
 import com.astralink.terralink.ui.components.TerraIcons
 import com.astralink.terralink.ui.components.TerraTextField
+import com.astralink.terralink.ui.components.dismissKeyboardOnTap
 import kotlinx.coroutines.launch
 
 private data class AtBubble(val tsMs: Long, val fromUser: Boolean, val text: String, val isError: Boolean = false)
@@ -66,7 +64,6 @@ fun LoraConsoleScreen(
     var sending by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
-    val focusManager = LocalFocusManager.current
 
     // Load the persisted history once, on first open.
     LaunchedEffect(stationId) {
@@ -118,9 +115,7 @@ fun LoraConsoleScreen(
                 .fillMaxSize()
                 .padding(inner)
                 .imePadding()                         // keep the input above the keyboard
-                .pointerInput(Unit) {                 // tap anywhere to dismiss the keyboard
-                    detectTapGestures(onTap = { focusManager.clearFocus() })
-                },
+                .dismissKeyboardOnTap(),              // tap anywhere to dismiss the keyboard
         ) {
             // Conversation
             LazyColumn(

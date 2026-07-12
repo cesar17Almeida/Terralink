@@ -11,11 +11,15 @@ import com.astralink.terralink.ble.session.SaviaSession
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.StationsRepository
 import com.astralink.terralink.ui.ConfigurationScreen
+import com.astralink.terralink.ui.ConnectivityScreen
 import com.astralink.terralink.ui.DeviceScreen
 import com.astralink.terralink.ui.LogsScreen
 import com.astralink.terralink.ui.LoraConsoleScreen
+import com.astralink.terralink.ui.PinMapScreen
 import com.astralink.terralink.ui.PredictionsScreen
 import com.astralink.terralink.ui.ScanScreen
+import com.astralink.terralink.ui.SensorConsoleScreen
+import com.astralink.terralink.ui.SensorsScreen
 import com.astralink.terralink.ui.SplashScreen
 import com.astralink.terralink.ui.StationsListScreen
 import com.astralink.terralink.ui.SyncScreen
@@ -34,6 +38,10 @@ private sealed interface Screen {
     data class Configuration(val station: SavedStation) : Screen
     data class Logs(val station: SavedStation) : Screen
     data class Lora(val station: SavedStation) : Screen
+    data class Sensors(val station: SavedStation, val openWizard: Boolean = false) : Screen
+    data class SensorConsole(val station: SavedStation) : Screen
+    data class Connectivity(val station: SavedStation) : Screen
+    data class PinMap(val station: SavedStation) : Screen
 }
 
 @Composable
@@ -91,9 +99,17 @@ fun App() {
                     activeSession = active
                     screen = Screen.Configuration(current.station)
                 },
-                onOpenLora = { active ->
+                onOpenConnectivity = { active ->
                     activeSession = active
-                    screen = Screen.Lora(current.station)
+                    screen = Screen.Connectivity(current.station)
+                },
+                onOpenSensors = { active ->
+                    activeSession = active
+                    screen = Screen.Sensors(current.station)
+                },
+                onOpenPinMap = { active ->
+                    activeSession = active
+                    screen = Screen.PinMap(current.station)
                 },
                 onBack = {
                     activeSession = null
@@ -177,6 +193,61 @@ fun App() {
                     LoraConsoleScreen(
                         active = active,
                         stationId = current.station.bleId,
+                        onBack = { screen = Screen.Connectivity(current.station) },
+                    )
+                }
+            }
+
+            is Screen.Sensors -> {
+                val active = activeSession
+                if (active == null) {
+                    screen = Screen.Device(current.station)
+                } else {
+                    SensorsScreen(
+                        station = current.station,
+                        active = active,
+                        openWizardOnStart = current.openWizard,
+                        onOpenConsole = { screen = Screen.SensorConsole(current.station) },
+                        onBack = { screen = Screen.Device(current.station) },
+                    )
+                }
+            }
+
+            is Screen.SensorConsole -> {
+                val active = activeSession
+                if (active == null) {
+                    screen = Screen.Device(current.station)
+                } else {
+                    SensorConsoleScreen(
+                        active = active,
+                        stationId = current.station.bleId,
+                        onAddSensor = { screen = Screen.Sensors(current.station, openWizard = true) },
+                        onBack = { screen = Screen.Sensors(current.station) },
+                    )
+                }
+            }
+
+            is Screen.Connectivity -> {
+                val active = activeSession
+                if (active == null) {
+                    screen = Screen.Device(current.station)
+                } else {
+                    ConnectivityScreen(
+                        station = current.station,
+                        active = active,
+                        onOpenLoraConsole = { screen = Screen.Lora(current.station) },
+                        onBack = { screen = Screen.Device(current.station) },
+                    )
+                }
+            }
+
+            is Screen.PinMap -> {
+                val active = activeSession
+                if (active == null) {
+                    screen = Screen.Device(current.station)
+                } else {
+                    PinMapScreen(
+                        active = active,
                         onBack = { screen = Screen.Device(current.station) },
                     )
                 }

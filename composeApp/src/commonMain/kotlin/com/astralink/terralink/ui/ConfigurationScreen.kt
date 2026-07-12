@@ -2,7 +2,6 @@ package com.astralink.terralink.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -49,27 +48,27 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.protocol.ConfigPatchMsg
 import com.astralink.terralink.ble.protocol.ConfigSnapshotMsg
 import com.astralink.terralink.ble.protocol.DeviceInfo
-import com.astralink.terralink.ble.protocol.PinmapMsg
-import com.astralink.terralink.ble.protocol.SensorPatch
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.ReadingsRepository
 import com.astralink.terralink.ui.components.BackIconButton
 import com.astralink.terralink.ui.components.PasswordField
 import com.astralink.terralink.ui.components.SectionHeader
+import com.astralink.terralink.ui.components.SettingsGroup
+import com.astralink.terralink.ui.components.SettingsRowSpec
 import com.astralink.terralink.ui.components.Spec
 import com.astralink.terralink.ui.components.SpecTable
 import com.astralink.terralink.ui.components.TerraDialog
 import com.astralink.terralink.ui.components.TerraIcons
 import com.astralink.terralink.ui.components.TerraTextField
+import com.astralink.terralink.ui.components.dismissKeyboardOnTap
+import com.astralink.terralink.util.systemUtcOffsetMinutes
 import kotlinx.coroutines.launch
 
 // Matches the firmware's accepted sleep range (SAVIA_SLEEP_MIN_S..MAX_S).
@@ -78,6 +77,10 @@ private const val SLEEP_MAX_S = 86_400
 
 // Max advertised BLE name length (firmware SAVIA_BLE_NAME_MAX - 1).
 private const val BLE_NAME_MAX = 20
+
+// LoRa uplink cadence bounds (s): 5 min .. 24 h. Fair-use keeps this coarse.
+private const val LORA_PERIOD_MIN_S = 300
+private const val LORA_PERIOD_MAX_S = 86_400
 
 private sealed class ConfigPhase {
     data object Loading : ConfigPhase()
@@ -108,7 +111,7 @@ fun ConfigurationScreen(
     when (val p = phase) {
         ConfigPhase.Loading -> PlainConfigScaffold(onBack) { CenteredProgress("Leyendo configuración…") }
         is ConfigPhase.Failed -> PlainConfigScaffold(onBack) { ErrorPanel(p.message, onRetry = { reloadKey++ }) }
-        is ConfigPhase.Ready -> ConfigReady(station, p.snapshot, active, onViewLogs, onBack, onReload = { reloadKey++ })
+        is ConfigPhase.Ready -> ConfigReady(station, p.snapshot, active, onViewLogs, onBack)
     }
 }
 
@@ -127,6 +130,9 @@ private fun PlainConfigScaffold(onBack: () -> Unit, content: @Composable () -> U
     }
 }
 
+// Which detail the config list is currently showing (Home = the list itself).
+private enum class ConfigSection { Home, Station, Energy, Model, Location, Security, Dev, LocalData }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ConfigReady(
@@ -135,11 +141,10 @@ private fun ConfigReady(
     active: ActiveSession,
     onViewLogs: () -> Unit,
     onBack: () -> Unit,
-    onReload: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
-    val focusManager = LocalFocusManager.current
+    val locationRequester = rememberLocationRequester()
 
     // Locally cached history for this station (persisted on every sync).
     var cachedCount by remember(station) { mutableStateOf<Long?>(null) }
@@ -149,19 +154,41 @@ private fun ConfigReady(
         cachedCount = runCatching { ReadingsRepository.countByStation(station.bleId) }.getOrNull()
     }
 
+    // On connect, keep the station's UTC offset aligned with the phone's so daily_hour /
+    // irrigation_hour are interpreted in local time. Silent: only utc_offset_min travels.
+    LaunchedEffect(snapshot) {
+        val sysOffset = systemUtcOffsetMinutes()
+        if (snapshot.utcOffsetMin != sysOffset) {
+            runCatching { active.writeConfig(ConfigPatchMsg(utcOffsetMin = sysOffset)) }
+        }
+    }
+
     // Committed = last value we know the station holds; updated on a successful save.
     var committedName by remember(snapshot) { mutableStateOf(snapshot.name) }
     var committedSleep by remember(snapshot) { mutableStateOf(snapshot.sleepS) }
     var committedDeep by remember(snapshot) { mutableStateOf(snapshot.deepSleep) }
     var committedMock by remember(snapshot) { mutableStateOf(snapshot.mockEnabled) }
     var committedLog by remember(snapshot) { mutableStateOf(snapshot.logLevel) }
+    var committedDaily by remember(snapshot) { mutableStateOf(snapshot.dailyHour) }
+    var committedIrr by remember(snapshot) { mutableStateOf(snapshot.irrigationHour) }
+    var committedLora by remember(snapshot) { mutableStateOf(snapshot.loraPeriodS) }
+    var committedInfer by remember(snapshot) { mutableStateOf(snapshot.inferenceMode) }
+    var committedLat by remember(snapshot) { mutableStateOf(snapshot.lat) }
+    var committedLon by remember(snapshot) { mutableStateOf(snapshot.lon) }
 
     var nameText by remember(snapshot) { mutableStateOf(snapshot.name) }
     var deepSleep by remember(snapshot) { mutableStateOf(snapshot.deepSleep) }
     var sleepText by remember(snapshot) { mutableStateOf(snapshot.sleepS.toString()) }
     var mockEnabled by remember(snapshot) { mutableStateOf(snapshot.mockEnabled) }
     var logLevel by remember(snapshot) { mutableStateOf(snapshot.logLevel) }
+    var dailyText by remember(snapshot) { mutableStateOf(snapshot.dailyHour.toString()) }
+    var irrText by remember(snapshot) { mutableStateOf(snapshot.irrigationHour.toString()) }
+    var loraText by remember(snapshot) { mutableStateOf(snapshot.loraPeriodS.toString()) }
+    var inferMode by remember(snapshot) { mutableStateOf(snapshot.inferenceMode) }
+    var latText by remember(snapshot) { mutableStateOf(snapshot.lat?.let { fmtCoord(it) } ?: "") }
+    var lonText by remember(snapshot) { mutableStateOf(snapshot.lon?.let { fmtCoord(it) } ?: "") }
     var advanced by remember { mutableStateOf(false) }
+    var section by remember { mutableStateOf(ConfigSection.Home) }
     var saving by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var clearing by remember { mutableStateOf(false) }
@@ -173,42 +200,36 @@ private fun ConfigReady(
     var pwError by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(snapshot) { prov = runCatching { active.readAuthState().prov }.getOrNull() }
 
-    // Sensors: the GPIO inventory drives the wizard's pin step; the wizard/delete
-    // send a full-table ConfigPatchMsg and reload so the screen reflects the device.
-    var pinmap by remember { mutableStateOf<PinmapMsg?>(null) }
-    LaunchedEffect(snapshot) { pinmap = runCatching { active.readPinmap() }.getOrNull() }
-    var wizard by remember { mutableStateOf<SensorTarget?>(null) }
-    var savingSensors by remember { mutableStateOf(false) }
-    var sensorError by remember { mutableStateOf<String?>(null) }
-    var confirmDeleteSensor by remember { mutableStateOf<Int?>(null) }
-
-    fun sendSensorTable(table: List<SensorPatch>, onOk: () -> Unit) {
-        savingSensors = true
-        sensorError = null
-        scope.launch {
-            try {
-                active.writeConfig(ConfigPatchMsg(sensors = table))
-                onOk()
-            } catch (e: Throwable) {
-                sensorError = e.message ?: "No se pudo guardar el sensor"
-            } finally {
-                savingSensors = false
-            }
-        }
-    }
-
     val sleepValue = sleepText.trim().toIntOrNull()
     val sleepValid = sleepValue != null && sleepValue in SLEEP_MIN_S..SLEEP_MAX_S
     val nameTrimmed = nameText.trim()
     val nameValid = nameTrimmed.isNotEmpty() && nameTrimmed.length <= BLE_NAME_MAX
+    val daily = dailyText.trim().toIntOrNull()
+    val dailyValid = daily != null && daily in 0..23
+    val irr = irrText.trim().toIntOrNull()
+    val irrValid = irr != null && irr in 0..23
+    val lora = loraText.trim().toIntOrNull()
+    val loraValid = lora != null && lora in LORA_PERIOD_MIN_S..LORA_PERIOD_MAX_S
+    val lat = latText.trim().toDoubleOrNull()
+    val lon = lonText.trim().toDoubleOrNull()
+    val coordsBothFilled = latText.isNotBlank() && lonText.isNotBlank()
+    val coordsValid = lat != null && lon != null && lat in -90.0..90.0 && lon in -180.0..180.0
+    val coordsEntryOk = !coordsBothFilled || coordsValid
+    val coordsChanged = coordsValid && (lat != committedLat || lon != committedLon)
+
+    val allValid = sleepValid && nameValid && dailyValid && irrValid && loraValid && coordsEntryOk
     val dirty = (nameValid && nameTrimmed != committedName) ||
         deepSleep != committedDeep ||
         (sleepValid && sleepValue != committedSleep) ||
         mockEnabled != committedMock ||
-        logLevel != committedLog
+        logLevel != committedLog ||
+        (dailyValid && daily != committedDaily) ||
+        (irrValid && irr != committedIrr) ||
+        (loraValid && lora != committedLora) ||
+        inferMode != committedInfer ||
+        coordsChanged
 
     fun save() {
-        val newSleep = if (sleepValid) sleepValue else null
         saving = true
         error = null
         scope.launch {
@@ -216,10 +237,16 @@ private fun ConfigReady(
                 val applied = active.writeConfig(
                     ConfigPatchMsg(
                         name = nameTrimmed.takeIf { nameValid && it != committedName },
-                        sleepS = newSleep?.takeIf { it != committedSleep },
+                        sleepS = if (sleepValid && sleepValue != committedSleep) sleepValue else null,
                         deepSleep = if (deepSleep != committedDeep) deepSleep else null,
                         mock = if (mockEnabled != committedMock) mockEnabled else null,
                         logLevel = if (logLevel != committedLog) logLevel else null,
+                        dailyHour = if (dailyValid && daily != committedDaily) daily else null,
+                        irrigationHour = if (irrValid && irr != committedIrr) irr else null,
+                        loraPeriodS = if (loraValid && lora != committedLora) lora else null,
+                        inferenceMode = if (inferMode != committedInfer) inferMode else null,
+                        lat = if (coordsChanged) lat else null,
+                        lon = if (coordsChanged) lon else null,
                     ),
                 )
                 // Reflect the station's CONFIRMED state (this clears "dirty").
@@ -228,6 +255,13 @@ private fun ConfigReady(
                 committedDeep = applied.deepSleep; deepSleep = applied.deepSleep
                 committedMock = applied.mockEnabled; mockEnabled = applied.mockEnabled
                 committedLog = applied.logLevel; logLevel = applied.logLevel
+                committedDaily = applied.dailyHour; dailyText = applied.dailyHour.toString()
+                committedIrr = applied.irrigationHour; irrText = applied.irrigationHour.toString()
+                committedLora = applied.loraPeriodS; loraText = applied.loraPeriodS.toString()
+                committedInfer = applied.inferenceMode; inferMode = applied.inferenceMode
+                committedLat = applied.lat; committedLon = applied.lon
+                latText = applied.lat?.let { fmtCoord(it) } ?: ""
+                lonText = applied.lon?.let { fmtCoord(it) } ?: ""
                 snackbarHostState.showSnackbar(
                     "Aplicado ✓ · sueño ${secondsToHuman(applied.sleepS)} · " +
                         "ahorro ${if (applied.deepSleep) "ON" else "OFF"}",
@@ -240,29 +274,50 @@ private fun ConfigReady(
         }
     }
 
-    // The sensor wizard takes over the whole screen while open (its own Scaffold).
-    val wizardTarget = wizard
-    if (wizardTarget != null) {
-        SensorWizardScreen(
-            target = wizardTarget,
-            existing = snapshot.sensors,
-            pinmap = pinmap,
-            busy = savingSensors,
-            error = sensorError,
-            onCancel = { wizard = null; sensorError = null },
-            onSave = { table -> sendSensorTable(table) { wizard = null; sensorError = null; onReload() } },
-        )
-        return
+    fun clearLocation() {
+        saving = true
+        error = null
+        scope.launch {
+            try {
+                val applied = active.clearCoords()
+                committedLat = applied.lat; committedLon = applied.lon
+                latText = ""; lonText = ""
+                snackbarHostState.showSnackbar("Ubicación borrada ✓")
+            } catch (e: Throwable) {
+                error = e.message ?: "No se pudo borrar la ubicación"
+            } finally {
+                saving = false
+            }
+        }
+    }
+
+    val sectionTitle = when (section) {
+        ConfigSection.Home -> "Configuración"
+        ConfigSection.Station -> "Estación"
+        ConfigSection.Energy -> "Ahorro de energía"
+        ConfigSection.Model -> "Modelo e inferencia"
+        ConfigSection.Location -> "Ubicación"
+        ConfigSection.Security -> "Seguridad"
+        ConfigSection.Dev -> "Desarrollo"
+        ConfigSection.LocalData -> "Datos guardados"
     }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Configuración", fontWeight = FontWeight.SemiBold) },
-                navigationIcon = { BackIconButton(onClick = onBack) },
+                title = { Text(sectionTitle, fontWeight = FontWeight.SemiBold) },
+                navigationIcon = {
+                    BackIconButton(onClick = {
+                        if (section == ConfigSection.Home) onBack() else section = ConfigSection.Home
+                    })
+                },
                 actions = {
-                    TextButton(onClick = { save() }, enabled = dirty && sleepValid && nameValid && !saving) {
-                        Text(if (saving) "Guardando…" else "Guardar")
+                    // Save lives at the top level so edits made in any detail can be
+                    // committed from anywhere; only shown when there is something to save.
+                    if (dirty) {
+                        TextButton(onClick = { save() }, enabled = allValid && !saving) {
+                            Text(if (saving) "Guardando…" else "Guardar")
+                        }
                     }
                 },
             )
@@ -273,64 +328,96 @@ private fun ConfigReady(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                // Tap anywhere outside a field to drop focus + hide the keyboard.
-                .pointerInput(Unit) {
-                    detectTapGestures(onTap = { focusManager.clearFocus() })
-                }
+                .dismissKeyboardOnTap()       // tap outside a field to hide the keyboard
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            DeviceHeroCard(snapshot.device)
+            when (section) {
+                ConfigSection.Home -> ConfigHome(
+                    snapshot = snapshot,
+                    stationName = committedName,
+                    deepSleep = deepSleep,
+                    mockEnabled = mockEnabled,
+                    inferMode = committedInfer,
+                    hasCoords = committedLat != null && committedLon != null,
+                    prov = prov,
+                    localCount = cachedCount,
+                    onOpen = { section = it },
+                    onViewLogs = onViewLogs,
+                )
 
-            EnergyCard(
-                deepSleep = deepSleep,
-                onToggle = { deepSleep = it; error = null },
-                advanced = advanced,
-                onToggleAdvanced = { advanced = !advanced },
-                sleepText = sleepText,
-                onSleepChange = { sleepText = it.filter { c -> c.isDigit() }; error = null },
-                sleepValid = sleepValid,
-            )
+                ConfigSection.Station -> StationCard(
+                    snapshot = snapshot,
+                    name = nameText,
+                    onNameChange = { nameText = it.take(BLE_NAME_MAX); error = null },
+                    nameValid = nameValid,
+                    dailyText = dailyText,
+                    onDailyChange = { dailyText = it.filter { c -> c.isDigit() }.take(2); error = null },
+                    dailyValid = dailyValid,
+                    irrText = irrText,
+                    onIrrChange = { irrText = it.filter { c -> c.isDigit() }.take(2); error = null },
+                    irrValid = irrValid,
+                    loraText = loraText,
+                    onLoraChange = { loraText = it.filter { c -> c.isDigit() }; error = null },
+                    loraValid = loraValid,
+                )
 
-            StationCard(
-                snapshot = snapshot,
-                name = nameText,
-                onNameChange = { nameText = it.take(BLE_NAME_MAX); error = null },
-                nameValid = nameValid,
-            )
+                ConfigSection.Energy -> EnergyCard(
+                    deepSleep = deepSleep,
+                    onToggle = { deepSleep = it; error = null },
+                    advanced = advanced,
+                    onToggleAdvanced = { advanced = !advanced },
+                    sleepText = sleepText,
+                    onSleepChange = { sleepText = it.filter { c -> c.isDigit() }; error = null },
+                    sleepValid = sleepValid,
+                )
 
-            SensorsCard(
-                sensors = snapshot.sensors,
-                busy = savingSensors,
-                onAdd = { sensorError = null; wizard = SensorTarget.New },
-                onEdit = { i -> sensorError = null; wizard = SensorTarget.Edit(i, snapshot.sensors[i]) },
-                onDelete = { i -> confirmDeleteSensor = i },
-            )
-            sensorError?.let {
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                ConfigSection.Model -> ModelCard(
+                    inferMode = inferMode,
+                    inferDev = snapshot.inferDev,
+                    onSelect = { inferMode = it; error = null },
+                )
+
+                ConfigSection.Location -> LocationCard(
+                    latText = latText,
+                    lonText = lonText,
+                    onLatChange = { latText = filterSignedDecimal(it); error = null },
+                    onLonChange = { lonText = filterSignedDecimal(it); error = null },
+                    coordsEntryOk = coordsEntryOk,
+                    hasCommitted = committedLat != null && committedLon != null,
+                    busy = saving,
+                    onClear = { clearLocation() },
+                    onUseDevice = locationRequester?.let {
+                        {
+                            it.request { coords ->
+                                if (coords != null) {
+                                    latText = fmtCoord(coords.lat); lonText = fmtCoord(coords.lon); error = null
+                                } else {
+                                    scope.launch { snackbarHostState.showSnackbar("No se pudo obtener la ubicación") }
+                                }
+                            }
+                        }
+                    },
+                )
+
+                ConfigSection.Security -> SecurityCard(prov = prov, onManage = { pwDialog = true })
+
+                ConfigSection.Dev -> DevCard(
+                    mockEnabled = mockEnabled,
+                    onMockToggle = { mockEnabled = it; error = null },
+                    logLevel = logLevel,
+                    onLogLevelChange = { logLevel = it; error = null },
+                    clearing = clearing,
+                    onClearData = { confirmClear = true },
+                )
+
+                ConfigSection.LocalData -> LocalDataCard(
+                    count = cachedCount,
+                    deleting = deletingLocal,
+                    onDelete = { confirmDeleteLocal = true },
+                )
             }
-
-            DevCard(
-                mockEnabled = mockEnabled,
-                onMockToggle = { mockEnabled = it; error = null },
-                logLevel = logLevel,
-                onLogLevelChange = { logLevel = it; error = null },
-                clearing = clearing,
-                onClearData = { confirmClear = true },
-            )
-
-            SecurityCard(prov = prov, onManage = { pwDialog = true })
-
-            OutlinedButton(onClick = onViewLogs, modifier = Modifier.fillMaxWidth()) {
-                Text("Ver logs del dispositivo")
-            }
-
-            LocalDataCard(
-                count = cachedCount,
-                deleting = deletingLocal,
-                onDelete = { confirmDeleteLocal = true },
-            )
 
             error?.let {
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
@@ -361,29 +448,6 @@ private fun ConfigReady(
                 "Se eliminarán las lecturas históricas de esta estación guardadas en este " +
                     "teléfono. Los datos en el dispositivo no se tocan; puedes volver a " +
                     "descargarlas sincronizando.",
-            )
-        }
-    }
-
-    confirmDeleteSensor?.let { idx ->
-        val s = snapshot.sensors.getOrNull(idx)
-        TerraDialog(
-            onDismiss = { confirmDeleteSensor = null },
-            title = "¿Eliminar sensor?",
-            confirmText = "Eliminar",
-            destructive = true,
-            confirmEnabled = !savingSensors,
-            onConfirm = {
-                confirmDeleteSensor = null
-                sendSensorTable(sensorTableWithout(snapshot.sensors, idx)) {
-                    sensorError = null; onReload()
-                }
-            },
-        ) {
-            Text(
-                "Se quitará el sensor del puerto ${s?.port ?: (idx + 1)}" +
-                    (s?.let { " (${sensorTypeLabel(it.type)})" } ?: "") +
-                    ". Puedes volver a añadirlo cuando quieras.",
             )
         }
     }
@@ -439,6 +503,102 @@ private fun ConfigReady(
             },
         )
     }
+}
+
+/** The settings list itself: a device hero card on top, then grouped iOS-style rows. */
+@Composable
+private fun ConfigHome(
+    snapshot: ConfigSnapshotMsg,
+    stationName: String,
+    deepSleep: Boolean,
+    mockEnabled: Boolean,
+    inferMode: String,
+    hasCoords: Boolean,
+    prov: Boolean?,
+    localCount: Long?,
+    onOpen: (ConfigSection) -> Unit,
+    onViewLogs: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+
+    DeviceHeroCard(snapshot.device)
+
+    SettingsGroup(
+        header = "Ajustes",
+        rows = listOf(
+            SettingsRowSpec(
+                icon = TerraIcons.Antenna,
+                title = "Estación",
+                value = stationName,
+                container = scheme.primaryContainer,
+                content = scheme.onPrimaryContainer,
+                onClick = { onOpen(ConfigSection.Station) },
+            ),
+            SettingsRowSpec(
+                icon = TerraIcons.Bolt,
+                title = "Ahorro de energía",
+                value = if (deepSleep) "Activado" else "Desactivado",
+                container = scheme.tertiaryContainer,
+                content = scheme.onTertiaryContainer,
+                onClick = { onOpen(ConfigSection.Energy) },
+            ),
+            SettingsRowSpec(
+                icon = TerraIcons.Memory,
+                title = "Modelo e inferencia",
+                value = if (inferMode == "local") "En el dispositivo" else "En la nube/app",
+                container = scheme.secondaryContainer,
+                content = scheme.onSecondaryContainer,
+                onClick = { onOpen(ConfigSection.Model) },
+            ),
+            SettingsRowSpec(
+                icon = TerraIcons.WaterDrop,
+                title = "Ubicación",
+                value = if (hasCoords) "Definida" else "Sin definir",
+                onClick = { onOpen(ConfigSection.Location) },
+            ),
+            SettingsRowSpec(
+                icon = TerraIcons.Lock,
+                title = "Seguridad",
+                value = when (prov) {
+                    true -> "Protegida"
+                    false -> "Sin contraseña"
+                    null -> "…"
+                },
+                onClick = { onOpen(ConfigSection.Security) },
+            ),
+        ),
+    )
+
+    SettingsGroup(
+        header = "Avanzado",
+        rows = listOf(
+            SettingsRowSpec(
+                icon = TerraIcons.Memory,
+                title = "Desarrollo",
+                value = if (mockEnabled) "Mock ON" else null,
+                onClick = { onOpen(ConfigSection.Dev) },
+            ),
+            SettingsRowSpec(
+                icon = TerraIcons.Terminal,
+                title = "Logs del dispositivo",
+                onClick = onViewLogs,
+            ),
+        ),
+    )
+
+    SettingsGroup(
+        header = "Datos",
+        rows = listOf(
+            SettingsRowSpec(
+                icon = TerraIcons.Delete,
+                title = "Datos guardados",
+                value = localCount?.let { if (it == 0L) "Vacío" else "$it" },
+                container = scheme.errorContainer,
+                content = scheme.onErrorContainer,
+                onClick = { onOpen(ConfigSection.LocalData) },
+            ),
+        ),
+    )
 }
 
 @Composable
@@ -542,9 +702,9 @@ private fun DevCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Datos simulados (mock)", style = MaterialTheme.typography.bodyMedium)
+                    Text("Modo desarrollador (mock)", style = MaterialTheme.typography.bodyMedium)
                     Text(
-                        text = "Genera lecturas de prueba en el dispositivo",
+                        text = "Genera lecturas de prueba y muestra las herramientas de simulación",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -614,12 +774,16 @@ private fun StationCard(
     name: String,
     onNameChange: (String) -> Unit,
     nameValid: Boolean,
+    dailyText: String,
+    onDailyChange: (String) -> Unit,
+    dailyValid: Boolean,
+    irrText: String,
+    onIrrChange: (String) -> Unit,
+    irrValid: Boolean,
+    loraText: String,
+    onLoraChange: (String) -> Unit,
+    loraValid: Boolean,
 ) {
-    val specs = buildList {
-        add(Spec("Captura", "cada ${secondsToHuman(snapshot.captureS)}"))
-        add(Spec("Ciclo diario", "${snapshot.dailyHour}:00 UTC"))
-        add(Spec("Botón", "GPIO ${snapshot.wakeGpio}"))
-    }
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
         Column(modifier = Modifier.padding(20.dp)) {
             SectionHeader("Estación")
@@ -636,14 +800,174 @@ private fun StationCard(
                     )
                 },
             )
+
+            Spacer(Modifier.height(14.dp))
+            Text("Programación", style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                TerraTextField(
+                    value = dailyText,
+                    onValueChange = onDailyChange,
+                    label = "Ciclo diario (hora local)",
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    isError = dailyText.isNotEmpty() && !dailyValid,
+                    supportingText = { Text(if (dailyText.isNotEmpty() && !dailyValid) "0 a 23" else "h") },
+                )
+                TerraTextField(
+                    value = irrText,
+                    onValueChange = onIrrChange,
+                    label = "Hora de riego",
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    isError = irrText.isNotEmpty() && !irrValid,
+                    supportingText = { Text(if (irrText.isNotEmpty() && !irrValid) "0 a 23" else "h local") },
+                )
+            }
+
+            Spacer(Modifier.height(14.dp))
+            Text("LoRa", style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
+            TerraTextField(
+                value = loraText,
+                onValueChange = onLoraChange,
+                label = "Periodo de envío (segundos)",
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                isError = loraText.isNotEmpty() && !loraValid,
+                supportingText = {
+                    if (loraText.isNotEmpty() && !loraValid) {
+                        Text("Entre $LORA_PERIOD_MIN_S s (5 min) y $LORA_PERIOD_MAX_S s (24 h)")
+                    } else {
+                        Text(loraText.toIntOrNull()?.let { "= ${secondsToHuman(it)}" } ?: "")
+                    }
+                },
+            )
+
             Spacer(Modifier.height(14.dp))
             Text(
-                "Programación y hardware",
+                "Hardware",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(8.dp))
-            SpecTable(rows = specs)
+            SpecTable(
+                rows = listOf(
+                    Spec("Captura", "cada ${secondsToHuman(snapshot.captureS)}"),
+                    Spec("Botón", "GPIO ${snapshot.wakeGpio}"),
+                ),
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ModelCard(
+    inferMode: String,
+    inferDev: Boolean,
+    onSelect: (String) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            SectionHeader("¿Dónde se ejecuta el modelo?", accent = MaterialTheme.colorScheme.secondary)
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = inferMode == "local",
+                    onClick = { if (inferDev) onSelect("local") },
+                    enabled = inferDev,
+                    label = { Text("En el dispositivo") },
+                )
+                FilterChip(
+                    selected = inferMode == "forward",
+                    onClick = { onSelect("forward") },
+                    label = { Text("En la nube/app") },
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = when {
+                    !inferDev -> "Este firmware no incluye el modelo en el dispositivo, así que la " +
+                        "inferencia se hace fuera (nube/app). La estación sólo sirve los datos de entrada."
+                    inferMode == "local" -> "La estación ejecuta el LSTM localmente y publica el resultado."
+                    else -> "La estación sirve los datos de entrada; el modelo se ejecuta en la nube o la app."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun LocationCard(
+    latText: String,
+    lonText: String,
+    onLatChange: (String) -> Unit,
+    onLonChange: (String) -> Unit,
+    coordsEntryOk: Boolean,
+    hasCommitted: Boolean,
+    busy: Boolean,
+    onClear: () -> Unit,
+    onUseDevice: (() -> Unit)?,
+) {
+    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            SectionHeader("Ubicación", accent = MaterialTheme.colorScheme.tertiary)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Coordenadas de la estación, usadas para el pronóstico meteorológico. " +
+                    "Introduce ambas juntas o déjalas vacías.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                TerraTextField(
+                    value = latText,
+                    onValueChange = onLatChange,
+                    label = "Latitud",
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    isError = !coordsEntryOk,
+                )
+                TerraTextField(
+                    value = lonText,
+                    onValueChange = onLonChange,
+                    label = "Longitud",
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    isError = !coordsEntryOk,
+                )
+            }
+            if (!coordsEntryOk) {
+                Spacer(Modifier.height(4.dp))
+                Text("Latitud −90..90 y longitud −180..180", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error)
+            }
+            if (onUseDevice != null) {
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(onClick = onUseDevice, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    Text("Usar mi ubicación")
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onClear,
+                enabled = !busy && hasCommitted,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) {
+                Text("Borrar ubicación")
+            }
+            Text(
+                "Guardar aplica las coordenadas escritas; \"Borrar\" las elimina en la estación.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp),
+            )
         }
     }
 }
@@ -810,4 +1134,29 @@ private fun secondsToHuman(s: Int): String = when {
     s % 3600 == 0 && s >= 3600 -> "${s / 3600} h"
     s % 60 == 0 && s >= 60 -> "${s / 60} min"
     else -> "$s s"
+}
+
+// Keep only a leading '-', digits and a single '.', so a coordinate field never
+// holds a value String.toDoubleOrNull can't parse.
+private fun filterSignedDecimal(s: String): String {
+    val sb = StringBuilder()
+    var dot = false
+    s.forEachIndexed { i, c ->
+        when {
+            c == '-' && i == 0 -> sb.append(c)
+            c == '.' && !dot -> { dot = true; sb.append(c) }
+            c.isDigit() -> sb.append(c)
+        }
+    }
+    return sb.toString()
+}
+
+// Double -> short decimal string (<= 6 dp, trailing zeros trimmed), no platform format.
+private fun fmtCoord(v: Double): String {
+    val neg = v < 0
+    val scaled = kotlin.math.round(kotlin.math.abs(v) * 1_000_000).toLong()
+    val whole = scaled / 1_000_000
+    val frac = (scaled % 1_000_000).toString().padStart(6, '0').trimEnd('0')
+    val sign = if (neg && (whole != 0L || frac.isNotEmpty())) "-" else ""
+    return if (frac.isEmpty()) "$sign$whole" else "$sign$whole.$frac"
 }

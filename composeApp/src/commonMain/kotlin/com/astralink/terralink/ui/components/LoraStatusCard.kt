@@ -1,6 +1,5 @@
 package com.astralink.terralink.ui.components
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,9 +22,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.protocol.LoraStatus
@@ -72,7 +68,7 @@ fun LoraStatusCard(
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
-                SignalIndicator(lora, Modifier.size(width = 46.dp, height = 30.dp))
+                LoraSignalIndicator(lora, Modifier.size(32.dp))
             }
 
             Spacer(Modifier.height(10.dp))
@@ -139,43 +135,3 @@ private fun statusLine(l: LoraStatus?): String = when {
     else -> "Sin respuesta"
 }
 
-private fun rssiToBars(rssi: Int?): Int = when {
-    rssi == null -> 0
-    rssi >= -95 -> 4
-    rssi >= -105 -> 3
-    rssi >= -115 -> 2
-    rssi >= -125 -> 1
-    else -> 0
-}
-
-// 4 bars when connected; faint bars with a red diagonal slash when there's no link.
-@Composable
-private fun SignalIndicator(l: LoraStatus?, modifier: Modifier = Modifier) {
-    val connected = l?.joined == true && l.rssi != null
-    val bars = if (connected) rssiToBars(l?.rssi) else 0
-    val active = MaterialTheme.colorScheme.primary
-    val muted = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
-    val slash = MaterialTheme.colorScheme.error
-    Canvas(modifier) {
-        val n = 4
-        val gap = size.width * 0.06f
-        val bw = (size.width - gap * (n - 1)) / n
-        for (i in 0 until n) {
-            val h = size.height * (0.4f + 0.2f * i)
-            drawRoundRect(
-                color = if (i < bars) active else muted,
-                topLeft = Offset(i * (bw + gap), size.height - h),
-                size = Size(bw, h),
-                cornerRadius = CornerRadius(bw * 0.25f, bw * 0.25f),
-            )
-        }
-        if (!connected) {   // "no connection" symbol
-            drawLine(
-                color = slash,
-                start = Offset(size.width * 0.06f, size.height * 0.08f),
-                end = Offset(size.width * 0.94f, size.height * 0.92f),
-                strokeWidth = size.height * 0.10f,
-            )
-        }
-    }
-}

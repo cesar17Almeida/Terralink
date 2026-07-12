@@ -40,6 +40,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.astralink.terralink.ble.BleError
+import com.astralink.terralink.ble.protocol.LoraStatus
 import com.astralink.terralink.ble.protocol.StatusMsg
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.ble.session.SaviaSession
@@ -47,11 +48,13 @@ import kotlinx.coroutines.launch
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.StationsRepository
 import com.astralink.terralink.ui.components.BackIconButton
-import com.astralink.terralink.ui.components.ConnectionStatusChip
-import com.astralink.terralink.ui.components.LoraStatusCard
+import com.astralink.terralink.ui.components.LoraPingDialog
+import com.astralink.terralink.ui.components.LoraSignalGlance
 import com.astralink.terralink.ui.components.PasswordField
 import com.astralink.terralink.ui.components.PremiumTile
 import com.astralink.terralink.ui.components.TerraIcons
+import com.astralink.terralink.ui.components.dismissKeyboardOnTap
+import com.astralink.terralink.util.formatRelativeMs
 import com.astralink.terralink.util.nowMs
 
 private sealed class ConnState {
@@ -77,7 +80,9 @@ fun DeviceScreen(
     onSyncData: (ActiveSession) -> Unit,
     onViewPredictions: (ActiveSession) -> Unit,
     onConfigure: (ActiveSession) -> Unit,
-    onOpenLora: (ActiveSession) -> Unit,
+    onOpenConnectivity: (ActiveSession) -> Unit,
+    onOpenSensors: (ActiveSession) -> Unit,
+    onOpenPinMap: (ActiveSession) -> Unit,
     onBack: () -> Unit,
 ) {
     var state by remember { mutableStateOf<ConnState>(ConnState.Connecting) }
@@ -118,7 +123,7 @@ fun DeviceScreen(
             )
         },
     ) { innerPadding ->
-        Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+        Box(modifier = Modifier.fillMaxSize().padding(innerPadding).dismissKeyboardOnTap()) {
             when (val s = state) {
                 ConnState.Connecting -> ConnectingPanel(currentStation)
                 is ConnState.Failed -> FailedPanel(s.message, onRetry = { retryKey++ })
@@ -144,7 +149,9 @@ fun DeviceScreen(
                     onSyncData = { onSyncData(s.session) },
                     onViewPredictions = { onViewPredictions(s.session) },
                     onConfigure = { onConfigure(s.session) },
-                    onOpenLora = { onOpenLora(s.session) },
+                    onOpenConnectivity = { onOpenConnectivity(s.session) },
+                    onOpenSensors = { onOpenSensors(s.session) },
+                    onOpenPinMap = { onOpenPinMap(s.session) },
                 )
             }
         }
@@ -244,13 +251,20 @@ private fun ReadyPanel(
     onSyncData: () -> Unit,
     onViewPredictions: () -> Unit,
     onConfigure: () -> Unit,
-    onOpenLora: () -> Unit,
+    onOpenConnectivity: () -> Unit,
+    onOpenSensors: () -> Unit,
+    onOpenPinMap: () -> Unit,
 ) {
     // How many readings the station currently holds (mostly mock data today).
     var readingCount by remember(session) { mutableStateOf<Long?>(null) }
     LaunchedEffect(session) {
         readingCount = runCatching { session.requestRawCount() }.getOrNull()
     }
+
+    // Last LoRa signal shown on the glance; the ping modal refreshes it in place.
+    var loraOverride by remember(session) { mutableStateOf<LoraStatus?>(null) }
+    var showLoraPing by remember { mutableStateOf(false) }
+    val effLora = loraOverride ?: status.lora
 
     Column(
         modifier = Modifier
@@ -259,13 +273,30 @@ private fun ReadyPanel(
             .padding(horizontal = 16.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        DeviceStatusCard(station = station, status = status, readingCount = readingCount)
-        LoraStatusCard(session = session, initial = status.lora)
+        DeviceStatusCard(
+            station = station,
+            status = status,
+            readingCount = readingCount,
+            lora = effLora,
+            onLoraClick = if (status.lora != null) ({ showLoraPing = true }) else null,
+        )
         TileGrid(
             onSyncData = onSyncData,
             onViewPredictions = onViewPredictions,
             onConfigure = onConfigure,
-            onOpenLora = onOpenLora,
+            onOpenConnectivity = onOpenConnectivity,
+            onOpenSensors = onOpenSensors,
+            onOpenPinMap = onOpenPinMap,
+        )
+    }
+
+    if (showLoraPing) {
+        LoraPingDialog(
+            session = session,
+            bleId = station.bleId,
+            initial = effLora,
+            onDismiss = { showLoraPing = false },
+            onResult = { loraOverride = it },
         )
     }
 }
@@ -275,7 +306,9 @@ private fun TileGrid(
     onSyncData: () -> Unit,
     onViewPredictions: () -> Unit,
     onConfigure: () -> Unit,
-    onOpenLora: () -> Unit,
+    onOpenConnectivity: () -> Unit,
+    onOpenSensors: () -> Unit,
+    onOpenPinMap: () -> Unit,
 ) {
     // Two tiles per row: wider cards so titles/captions no longer truncate.
     // An odd count leaves one empty half-slot on the last row.
@@ -292,60 +325,64 @@ private fun TileGrid(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             PremiumTile(
+                title = "Sensores", caption = "Gestionar y consultar", icon = TerraIcons.Sensors,
+                onClick = onOpenSensors, modifier = Modifier.weight(1f),
+            )
+            PremiumTile(
                 title = "Configurar", caption = "Ajustes", icon = TerraIcons.Settings,
                 onClick = onConfigure, modifier = Modifier.weight(1f),
             )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             PremiumTile(
-                title = "LoRa", caption = "Consola AT", icon = TerraIcons.Memory,
-                onClick = onOpenLora, modifier = Modifier.weight(1f),
+                title = "Conectividad", caption = "LoRa y periféricos", icon = TerraIcons.Antenna,
+                onClick = onOpenConnectivity, modifier = Modifier.weight(1f),
+            )
+            PremiumTile(
+                title = "Mapa de pines", caption = "GPIO de la estación", icon = TerraIcons.Memory,
+                onClick = onOpenPinMap, modifier = Modifier.weight(1f),
             )
         }
     }
 }
 
 @Composable
-private fun DeviceStatusCard(station: SavedStation, status: StatusMsg, readingCount: Long?) {
+private fun DeviceStatusCard(
+    station: SavedStation,
+    status: StatusMsg,
+    readingCount: Long?,
+    lora: LoraStatus?,
+    onLoraClick: (() -> Unit)?,
+) {
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = station.displayName,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
-                ConnectionStatusChip(connected = true)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "fw ${status.fw} · " + (readingCount?.let { "$it lecturas" } ?: "… lecturas"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = "Último sync " + (station.lastSyncMs?.let { formatRelativeMs(it) } ?: "—"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = "fw ${status.fw} · " + (readingCount?.let { "$it lecturas" } ?: "… lecturas"),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = "Último sync " + (station.lastSyncMs?.let { formatRelativeMs(it) } ?: "—"),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            LoraSignalGlance(lora = lora, onClick = onLoraClick)
         }
-    }
-}
-
-private fun formatRelativeMs(ms: Long): String {
-    val delta = nowMs() - ms
-    val minutes = delta / 60_000
-    return when {
-        delta < 30_000 -> "hace instantes"
-        minutes < 1 -> "hace menos de 1 min"
-        minutes < 60 -> "hace ${minutes} min"
-        minutes < 1440 -> "hace ${minutes / 60} h"
-        else -> "hace ${minutes / 1440} d"
     }
 }

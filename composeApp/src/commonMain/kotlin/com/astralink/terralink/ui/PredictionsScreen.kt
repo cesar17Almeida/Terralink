@@ -56,6 +56,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.protocol.IngestPoint
+import com.astralink.terralink.ble.protocol.PRED_KIND_IRRIGATION_EVENT
+import com.astralink.terralink.ble.protocol.PRED_MODEL_SCHED
 import com.astralink.terralink.ble.protocol.Prediction
 import com.astralink.terralink.ble.protocol.Reading
 import com.astralink.terralink.ble.protocol.ReadingKind
@@ -93,6 +95,9 @@ fun PredictionsScreen(
     var refreshing by remember { mutableStateOf(false) }     // soft reload -> fade overlay
     var loadingLabel by remember { mutableStateOf("Cargando…") }
     var logsDialog by remember { mutableStateOf(false) }     // logs modal (opened from a failure)
+    // Dev tools (mock forecast + ingest) hide unless the station has "mock" enabled --
+    // the existing per-station developer flag, toggled from ConfigurationScreen.
+    var devMode by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -100,6 +105,7 @@ fun PredictionsScreen(
     // The firmware handles ONE data_request at a time and the notify stream is
     // shared, so reads MUST run sequentially in a single coroutine.
     suspend fun fetchData() {
+        devMode = runCatching { active.readConfig().mockEnabled }.getOrNull() ?: devMode
         val now = nowMs()
         window48 = runCatching {
             active.requestRawReadings(fromMs = now - 48L * 3_600_000L, toMs = now)
@@ -161,6 +167,7 @@ fun PredictionsScreen(
                 is PredState.Loaded -> PredictionsContent(
                     predictions = s.predictions,
                     window48 = window48,
+                    devMode = devMode,
                     onIngest = { point ->
                         runAction("Enviando medida…", "Medida enviada ✓", "No se pudo enviar la medida") {
                             active.ingest(listOf(point))
@@ -284,12 +291,18 @@ private fun LogsDialog(active: ActiveSession, onDismiss: () -> Unit) {
 private fun PredictionsContent(
     predictions: List<Prediction>,
     window48: List<Reading>?,
+    devMode: Boolean,
     onIngest: (IngestPoint) -> Unit,
     onMockPred: () -> Unit,
     onReload: () -> Unit,
 ) {
     val forecast = predictions.filter { it.kind == KIND_HS30_FORECAST }.sortedBy { it.tsMs }
     val recommendation = predictions.lastOrNull { it.kind == KIND_RECOMMENDATION }?.value?.toInt()
+    // Scheduler markers (model="sched", kind="irrigation_event") are NOT forecast points:
+    // pull them out and render them as their own badge row instead of on the HS30 chart.
+    val irrigationEvents = predictions
+        .filter { it.model == PRED_MODEL_SCHED && it.kind == PRED_KIND_IRRIGATION_EVENT }
+        .sortedBy { it.tsMs }
 
     Column(
         modifier = Modifier
@@ -298,7 +311,9 @@ private fun PredictionsContent(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        if (window48 != null) InferenceProgressCard(window48, onIngest)
+        if (window48 != null) InferenceProgressCard(window48, devMode, onIngest)
+
+        if (irrigationEvents.isNotEmpty()) IrrigationEventsCard(irrigationEvents)
 
         if (predictions.isEmpty()) {
             Text(
@@ -309,15 +324,59 @@ private fun PredictionsContent(
         } else if (forecast.isNotEmpty()) {
             LastPredictionCard(forecast = forecast, recommendation = recommendation)
             ForecastCard(forecast)
-        } else {
+        } else if (recommendation != null || irrigationEvents.isEmpty()) {
             RecommendationCard(recommendation)
         }
 
-        // Dev: ask the station to publish a synthetic 24 h LSTM forecast.
-        OutlinedButton(onClick = onMockPred, modifier = Modifier.fillMaxWidth()) {
-            Text("Simular pronóstico LSTM (dev)")
+        // Dev: ask the station to publish a synthetic 24 h LSTM forecast (hidden unless dev mode).
+        if (devMode) {
+            OutlinedButton(onClick = onMockPred, modifier = Modifier.fillMaxWidth()) {
+                Text("Simular pronóstico LSTM (dev)")
+            }
         }
         Button(onClick = onReload, modifier = Modifier.fillMaxWidth()) { Text("Actualizar") }
+    }
+}
+
+// Scheduled irrigation events as a badge row (extracted from the prediction stream so
+// they never land on the HS30 forecast chart).
+@Composable
+private fun IrrigationEventsCard(events: List<Prediction>) {
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
+    ) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            Text("Riegos programados", style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Momentos en que el planificador prevé regar.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            events.forEach { e ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier.size(8.dp).clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.tertiary),
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text("${formatDateTime(e.tsMs)} UTC", style = MaterialTheme.typography.bodyMedium)
+                    }
+                    Text("Riego", style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.tertiary)
+                }
+                Spacer(Modifier.height(6.dp))
+            }
+        }
     }
 }
 
@@ -331,7 +390,7 @@ private fun mockPoint(kind: String, depth: Int, value: Double, count: Int): Inge
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun InferenceProgressCard(window48: List<Reading>, onIngest: (IngestPoint) -> Unit) {
+private fun InferenceProgressCard(window48: List<Reading>, devMode: Boolean, onIngest: (IngestPoint) -> Unit) {
     val hs10 = window48.count { it.kind == "soil_moisture" && it.depthCm == 10 }
     val hs30 = window48.count { it.kind == "soil_moisture" && it.depthCm == 30 }
     val ta = window48.count { it.kind == "air_temperature" }
@@ -359,23 +418,25 @@ private fun InferenceProgressCard(window48: List<Reading>, onIngest: (IngestPoin
             Spacer(Modifier.height(12.dp))
             SeriesRow("TA · temperatura del aire", ta, WINDOW_HOURS)
 
-            Spacer(Modifier.height(16.dp))
-            Text("Enviar una medida (dev · ingest)", style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = { onIngest(mockPoint(ReadingKind.SOIL_MOISTURE, 10, 0.70, hs10)) },
-                    enabled = hs10 < WINDOW_HOURS, modifier = Modifier.weight(1f),
-                ) { Text("+ HS10") }
-                OutlinedButton(
-                    onClick = { onIngest(mockPoint(ReadingKind.SOIL_MOISTURE, 30, 0.74, hs30)) },
-                    enabled = hs30 < WINDOW_HOURS, modifier = Modifier.weight(1f),
-                ) { Text("+ HS30") }
-                OutlinedButton(
-                    onClick = { onIngest(mockPoint(ReadingKind.AIR_TEMPERATURE, 0, 22.0, ta)) },
-                    enabled = ta < WINDOW_HOURS, modifier = Modifier.weight(1f),
-                ) { Text("+ TA") }
+            if (devMode) {
+                Spacer(Modifier.height(16.dp))
+                Text("Enviar una medida (dev · ingest)", style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { onIngest(mockPoint(ReadingKind.SOIL_MOISTURE, 10, 0.70, hs10)) },
+                        enabled = hs10 < WINDOW_HOURS, modifier = Modifier.weight(1f),
+                    ) { Text("+ HS10") }
+                    OutlinedButton(
+                        onClick = { onIngest(mockPoint(ReadingKind.SOIL_MOISTURE, 30, 0.74, hs30)) },
+                        enabled = hs30 < WINDOW_HOURS, modifier = Modifier.weight(1f),
+                    ) { Text("+ HS30") }
+                    OutlinedButton(
+                        onClick = { onIngest(mockPoint(ReadingKind.AIR_TEMPERATURE, 0, 22.0, ta)) },
+                        enabled = ta < WINDOW_HOURS, modifier = Modifier.weight(1f),
+                    ) { Text("+ TA") }
+                }
             }
         }
     }
@@ -563,9 +624,12 @@ private fun formatDateTime(ms: Long): String {
 
 private fun fmt(v: Double): String {
     // Two-decimal VWC without depending on platform String.format.
-    val scaled = (v * 100).toLong()
+    val neg = v < 0
+    val scaled = ((if (neg) -v else v) * 100).toLong()
     val whole = scaled / 100
-    val frac = (scaled % 100).let { if (it < 0) -it else it }
+    val frac = scaled % 100
+    // Track the sign separately: for v in (-1, 0) `whole` is 0 and would drop it.
+    val sign = if (neg && (whole != 0L || frac != 0L)) "-" else ""
     val fracStr = if (frac < 10) "0$frac" else "$frac"
-    return "$whole.$fracStr"
+    return "$sign$whole.$fracStr"
 }

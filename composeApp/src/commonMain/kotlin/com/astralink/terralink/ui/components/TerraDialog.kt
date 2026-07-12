@@ -42,7 +42,7 @@ fun TerraDialog(
                 fontWeight = FontWeight.SemiBold,
             )
         },
-        text = { Column(content = content) },
+        text = { Column(modifier = Modifier.dismissKeyboardOnTap(), content = content) },
         confirmButton = {
             TextButton(onClick = onConfirm, enabled = confirmEnabled) {
                 Text(

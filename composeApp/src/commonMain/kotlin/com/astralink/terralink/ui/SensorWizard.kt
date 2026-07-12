@@ -50,9 +50,9 @@ import com.astralink.terralink.ui.components.PicoPinout
 import com.astralink.terralink.ui.components.PinCap
 import com.astralink.terralink.ui.components.PinCell
 import com.astralink.terralink.ui.components.PinLive
-import com.astralink.terralink.ui.components.SectionHeader
 import com.astralink.terralink.ui.components.TerraIcons
 import com.astralink.terralink.ui.components.TerraTextField
+import com.astralink.terralink.ui.components.dismissKeyboardOnTap
 import com.astralink.terralink.ui.components.mergePinmap
 import com.astralink.terralink.ui.components.picoWHeader
 
@@ -69,7 +69,16 @@ private val SENSOR_TYPES = listOf(
         "Sensor analógico (ADC): valor = escala · crudo + offset", PinCap.ADC),
     SensorTypeInfo("onewire_ds18b20", "1-Wire DS18B20",
         "Termómetro digital que se autoidentifica (°C)", PinCap.PIO),
+    SensorTypeInfo("dht11", "DHT11 (temp + humedad)",
+        "Un pin digital; entrega temperatura y humedad del aire", PinCap.DIGITAL),
+    SensorTypeInfo("hc_sr04", "HC-SR04 (distancia)",
+        "Ultrasonidos; dos pines (trigger + echo); distancia en mm", PinCap.DIGITAL),
+    SensorTypeInfo("actuator", "Actuador (salida ON/OFF)",
+        "Un pin de salida digital; sin lecturas, control manual", PinCap.DIGITAL),
 )
+
+// Types that need a second pin (HC-SR04: gpio=trigger, gpio2=echo).
+private fun needsSecondPin(type: String): Boolean = type == "hc_sr04"
 
 private fun typeInfo(id: String): SensorTypeInfo =
     SENSOR_TYPES.firstOrNull { it.id == id } ?: SENSOR_TYPES.first()
@@ -80,6 +89,9 @@ private val READING_KINDS = listOf(
     "soil_moisture" to "Humedad de suelo",
     "soil_temperature" to "Temp. de suelo",
     "air_temperature" to "Temp. de aire",
+    "air_humidity" to "Humedad de aire",
+    "distance" to "Distancia",
+    "generic" to "Genérico",
 )
 
 private fun kindLabel(id: String): String = READING_KINDS.firstOrNull { it.first == id }?.second ?: id
@@ -95,6 +107,7 @@ private data class ChannelDraft(val kind: String = "soil_moisture", val depthTex
 private data class SensorDraft(
     val type: String = "sdi12_aquacheck",
     val gpio: Int? = null,
+    val gpio2: Int? = null,                  // HC-SR04 echo pin
     val addr: String = "0",
     val followGlobal: Boolean = true,
     val intervalText: String = "",
@@ -102,12 +115,14 @@ private data class SensorDraft(
     val depthText: String = "",
     val scaleText: String = "",
     val offsetText: String = "",
+    val unitText: String = "",               // free unit label (analog / generic)
     val channels: List<ChannelDraft> = listOf(ChannelDraft()),
 )
 
 private fun draftFrom(s: SensorInfo): SensorDraft = SensorDraft(
     type = s.type,
     gpio = s.gpio,
+    gpio2 = s.gpio2,
     addr = s.addr.ifBlank { "0" },
     followGlobal = s.intervalS <= 0,
     intervalText = if (s.intervalS > 0) s.intervalS.toString() else "",
@@ -115,10 +130,14 @@ private fun draftFrom(s: SensorInfo): SensorDraft = SensorDraft(
     depthText = s.depthCm?.toString() ?: "",
     scaleText = s.scale?.toString() ?: "",
     offsetText = s.offset?.toString() ?: "",
+    unitText = s.unit ?: "",
     channels = s.chan?.takeIf { it.isNotEmpty() }
         ?.map { ChannelDraft(it.kind, it.depthCm.toString()) }
         ?: listOf(ChannelDraft()),
 )
+
+// Max unit-label length (firmware slot->unit is <= 8 chars incl. NUL).
+private const val UNIT_MAX = 8
 
 // null when the draft isn't valid for its type (also gates the Guardar button).
 private fun SensorDraft.toPatchOrNull(): SensorPatch? {
@@ -126,6 +145,7 @@ private fun SensorDraft.toPatchOrNull(): SensorPatch? {
     val interval: Int? = if (followGlobal) null
         else intervalText.trim().toIntOrNull()?.takeIf { it in INTERVAL_MIN_S..INTERVAL_MAX_S } ?: return null
 
+    val unit = unitText.trim().take(UNIT_MAX).ifBlank { null }
     return when (type) {
         "sdi12_aquacheck" ->
             SensorPatch(gpio = g, type = type, addr = addr.ifBlank { "0" }, intervalS = interval)
@@ -137,7 +157,8 @@ private fun SensorDraft.toPatchOrNull(): SensorPatch? {
                 val d = c.depthText.trim().toIntOrNull() ?: return null
                 chans.add(ChannelPatch(c.kind, d))
             }
-            SensorPatch(gpio = g, type = type, addr = addr.ifBlank { "0" }, intervalS = interval, chan = chans)
+            SensorPatch(gpio = g, type = type, addr = addr.ifBlank { "0" }, intervalS = interval,
+                chan = chans, unit = unit)
         }
 
         "analog_linear" -> {
@@ -145,7 +166,7 @@ private fun SensorDraft.toPatchOrNull(): SensorPatch? {
             val off = offsetText.trim().ifBlank { "0" }.toDoubleOrNull() ?: return null
             val depth = depthText.trim().ifBlank { "0" }.toIntOrNull() ?: return null
             SensorPatch(gpio = g, type = type, intervalS = interval,
-                kind = kind, depthCm = depth, scale = sc, offset = off)
+                kind = kind, depthCm = depth, scale = sc, offset = off, unit = unit)
         }
 
         "onewire_ds18b20" -> {
@@ -153,18 +174,29 @@ private fun SensorDraft.toPatchOrNull(): SensorPatch? {
             SensorPatch(gpio = g, type = type, intervalS = interval, kind = kind, depthCm = depth)
         }
 
+        "dht11" ->                               // one digital pin; fixed outputs (air temp + humidity)
+            SensorPatch(gpio = g, type = type, intervalS = interval)
+
+        "hc_sr04" -> {                           // trigger = gpio, echo = gpio2 (both required)
+            val echo = gpio2 ?: return null
+            SensorPatch(gpio = g, type = type, gpio2 = echo, intervalS = interval, unit = unit)
+        }
+
+        "actuator" ->                            // one digital output; no readings
+            SensorPatch(gpio = g, type = type)
+
         else -> null
     }
 }
 
 // --- pinout cells (device pinmap + free up the sensor being edited) ----------
 
-private fun buildCells(pinmap: PinmapMsg?, freeGpio: Int?): List<PinCell> {
+private fun buildCells(pinmap: PinmapMsg?, freeGpios: Set<Int>, blocked: Int? = null): List<PinCell> {
     val header = picoWHeader()
     if (pinmap == null) return header
     val live = HashMap<Int, Triple<PinLive, String?, Int?>>()
     for (p in pinmap.pins) {
-        if (p.gpio == freeGpio) continue   // editing this sensor -> its current pin is selectable again
+        if (p.gpio in freeGpios) continue   // editing this sensor -> its own pins are selectable again
         val state = when (p.state) {
             "in_use" -> PinLive.IN_USE
             "reserved" -> PinLive.RESERVED
@@ -172,64 +204,26 @@ private fun buildCells(pinmap: PinmapMsg?, freeGpio: Int?): List<PinCell> {
         }
         live[p.gpio] = Triple(state, p.reason.ifBlank { null }, p.port)
     }
+    // A pin already chosen elsewhere in this wizard (the HC-SR04 trigger while picking
+    // echo, or vice-versa) shows as taken so the same pin can't be assigned twice.
+    if (blocked != null) live[blocked] = Triple(PinLive.IN_USE, "sensor", null)
     return mergePinmap(header, live)
 }
 
-// --- sensors list card (shown in ConfigurationScreen) -----------------------
+// --- sensor list row (shown in SensorsScreen) -------------------------------
 
 @Composable
-fun SensorsCard(
-    sensors: List<SensorInfo>,
-    busy: Boolean,
-    onAdd: () -> Unit,
-    onEdit: (Int) -> Unit,
-    onDelete: (Int) -> Unit,
-) {
-    Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-        Column(modifier = Modifier.padding(20.dp)) {
-            SectionHeader("Sensores", accent = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "Cada sensor se lee en un pin y puede tener su propia cadencia.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(12.dp))
-
-            if (sensors.isEmpty()) {
-                Text(
-                    "No hay sensores configurados.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                sensors.forEachIndexed { i, s ->
-                    SensorRow(index = i, sensor = s, busy = busy,
-                        onEdit = { onEdit(i) }, onDelete = { onDelete(i) })
-                    if (i < sensors.lastIndex) Spacer(Modifier.height(10.dp))
-                }
-            }
-
-            Spacer(Modifier.height(16.dp))
-            OutlinedButton(onClick = onAdd, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                Icon(TerraIcons.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Añadir sensor")
-            }
-        }
-    }
-}
-
-@Composable
-private fun SensorRow(
+internal fun SensorRow(
     index: Int,
     sensor: SensorInfo,
     busy: Boolean,
+    onOpen: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Column(modifier = Modifier.weight(1f)) {
+        // Tapping the row body opens this sensor's history; the pencil edits it.
+        Column(modifier = Modifier.weight(1f).clickable(enabled = !busy, onClick = onOpen)) {
             Text(
                 "${sensorTypeLabel(sensor.type)} · GPIO ${sensor.gpio}",
                 style = MaterialTheme.typography.bodyMedium,
@@ -239,6 +233,8 @@ private fun SensorRow(
                 buildString {
                     append("Puerto ${sensor.port}")
                     if (sensor.type.startsWith("sdi12") && sensor.addr.isNotBlank()) append(" · addr ${sensor.addr}")
+                    sensor.gpio2?.let { append(" · echo GPIO $it") }
+                    sensor.unit?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
                     append(" · ")
                     append(if (sensor.intervalS > 0) "cada ${intervalHuman(sensor.intervalS)}" else "cadencia global")
                 },
@@ -286,8 +282,9 @@ fun SensorWizardScreen(
     }
 
     val editIndex = (target as? SensorTarget.Edit)?.index
-    val cells = remember(pinmap, editIndex) {
-        buildCells(pinmap, freeGpio = (target as? SensorTarget.Edit)?.sensor?.gpio)
+    // The sensor being edited frees its own pin(s) so they're selectable again.
+    val editPins: Set<Int> = remember(target) {
+        (target as? SensorTarget.Edit)?.sensor?.let { setOfNotNull(it.gpio, it.gpio2) } ?: emptySet()
     }
     val patch = draft.toPatchOrNull()
 
@@ -299,7 +296,7 @@ fun SensorWizardScreen(
     }
 
     val canNext = when (step) {
-        1 -> draft.gpio != null   // a pin must be picked
+        1 -> draft.gpio != null && (!needsSecondPin(draft.type) || draft.gpio2 != null)
         else -> true
     }
 
@@ -332,14 +329,21 @@ fun SensorWizardScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(inner)
+                .dismissKeyboardOnTap()       // tap outside a field to hide the keyboard
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             StepHeader(step)
             when (step) {
-                0 -> TypeStep(draft) { draft = draft.copy(type = it, gpio = null) }
-                1 -> PinStep(draft, cells) { draft = draft.copy(gpio = it) }
+                0 -> TypeStep(draft) { draft = draft.copy(type = it, gpio = null, gpio2 = null) }
+                1 -> PinStep(
+                    draft = draft,
+                    pinmap = pinmap,
+                    editPins = editPins,
+                    onSelectTrigger = { draft = draft.copy(gpio = it) },
+                    onSelectEcho = { draft = draft.copy(gpio2 = it) },
+                )
                 2 -> MappingStep(draft) { draft = it }
                 3 -> CadenceStep(draft) { draft = it }
             }
@@ -390,30 +394,71 @@ private fun TypeStep(draft: SensorDraft, onPick: (String) -> Unit) {
 }
 
 @Composable
-private fun PinStep(draft: SensorDraft, cells: List<PinCell>, onSelect: (Int) -> Unit) {
+private fun PinStep(
+    draft: SensorDraft,
+    pinmap: PinmapMsg?,
+    editPins: Set<Int>,
+    onSelectTrigger: (Int) -> Unit,
+    onSelectEcho: (Int) -> Unit,
+) {
     val info = typeInfo(draft.type)
-    val capName = if (info.needCaps == PinCap.ADC) "analógico (ADC, GP26–28)" else "digital (bit-banged)"
+    val capName = if (info.needCaps == PinCap.ADC) "analógico (ADC, GP26–28)" else "digital"
+    val two = needsSecondPin(draft.type)
+    // Each picker blocks the pin the OTHER already holds so a pin can't be assigned twice.
+    val triggerCells = remember(pinmap, editPins, draft.gpio2) { buildCells(pinmap, editPins, blocked = draft.gpio2) }
+    val echoCells = remember(pinmap, editPins, draft.gpio) { buildCells(pinmap, editPins, blocked = draft.gpio) }
+
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
-            "Toca un pin resaltado. ${info.label} necesita un pin $capName.",
+            if (two) "El HC-SR04 usa dos pines: trigger (salida) y echo (entrada). Toca un pin para cada uno."
+            else "Toca un pin resaltado. ${info.label} necesita un pin $capName.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Text(
-            draft.gpio?.let { "Seleccionado: GPIO $it" } ?: "Ningún pin seleccionado",
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Medium,
-            color = if (draft.gpio != null) MaterialTheme.colorScheme.primary
-            else MaterialTheme.colorScheme.onSurfaceVariant,
+        PinPicker(
+            title = if (two) "Trigger (salida)" else null,
+            selected = draft.gpio,
+            cells = triggerCells,
+            needCaps = info.needCaps,
+            onSelect = onSelectTrigger,
         )
-        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-            PicoPinout(
-                cells = cells,
+        if (two) {
+            PinPicker(
+                title = "Echo (entrada)",
+                selected = draft.gpio2,
+                cells = echoCells,
                 needCaps = info.needCaps,
-                onSelect = onSelect,
-                modifier = Modifier.fillMaxWidth(0.66f),
+                onSelect = onSelectEcho,
             )
         }
+    }
+}
+
+@Composable
+private fun PinPicker(
+    title: String?,
+    selected: Int?,
+    cells: List<PinCell>,
+    needCaps: Int,
+    onSelect: (Int) -> Unit,
+) {
+    if (title != null) {
+        Text(title, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Medium)
+    }
+    Text(
+        selected?.let { "Seleccionado: GPIO $it" } ?: "Ningún pin seleccionado",
+        style = MaterialTheme.typography.bodyMedium,
+        fontWeight = FontWeight.Medium,
+        color = if (selected != null) MaterialTheme.colorScheme.primary
+        else MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        PicoPinout(
+            cells = cells,
+            needCaps = needCaps,
+            onSelect = onSelect,
+            modifier = Modifier.fillMaxWidth(0.66f),
+        )
     }
 }
 
@@ -459,6 +504,7 @@ private fun MappingStep(draft: SensorDraft, onChange: (SensorDraft) -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            UnitField(draft, onChange)
         }
 
         "onewire_ds18b20" -> Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -469,6 +515,65 @@ private fun MappingStep(draft: SensorDraft, onChange: (SensorDraft) -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+
+        "dht11" -> InfoStep(
+            "El DHT11 entrega temperatura y humedad del aire por un solo pin digital. " +
+                "No requiere más ajustes; sólo la cadencia en el siguiente paso.",
+        )
+
+        "hc_sr04" -> Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            InfoStep(
+                "El HC-SR04 mide distancia (mm) con un pulso de trigger y midiendo el echo. " +
+                    "Sin más ajustes; sólo la cadencia en el siguiente paso.",
+            )
+            WarningCard(
+                "El HC-SR04 clásico funciona a 5 V: su pin ECHO puede dañar la Pico (3.3 V). " +
+                    "Usa un divisor de tensión en ECHO o una variante de 3.3 V.",
+            )
+            UnitField(draft, onChange)
+        }
+
+        "actuator" -> InfoStep(
+            "Salida digital ON/OFF; no produce lecturas. Una vez guardado, contrólalo con el " +
+                "interruptor que aparece en la lista de sensores.",
+        )
+    }
+}
+
+@Composable
+private fun UnitField(draft: SensorDraft, onChange: (SensorDraft) -> Unit) {
+    TerraTextField(
+        value = draft.unitText,
+        onValueChange = { onChange(draft.copy(unitText = it.take(UNIT_MAX))) },
+        label = "Unidad (opcional)",
+        supportingText = { Text("Etiqueta libre para el valor (p. ej. mm, %, ppm). Máx. $UNIT_MAX.") },
+    )
+}
+
+@Composable
+private fun InfoStep(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+@Composable
+private fun WarningCard(text: String) {
+    Card(
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+    ) {
+        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.Top) {
+            Icon(
+                TerraIcons.Bolt, contentDescription = null,
+                tint = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(text, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer)
         }
     }
 }
@@ -670,4 +775,6 @@ private fun SensorInfo.toPatch(): SensorPatch = SensorPatch(
     scale = scale?.takeIf { type == "analog_linear" },
     offset = offset?.takeIf { type == "analog_linear" },
     chan = chan?.takeIf { type == "sdi12_generic" }?.map { ChannelPatch(it.kind, it.depthCm) },
+    gpio2 = gpio2?.takeIf { type == "hc_sr04" },
+    unit = unit,
 )

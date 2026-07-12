@@ -114,6 +114,7 @@ fun UpdateFirmwareScreen(
                     firmware = null
                     version = ""
                     progress = null
+                    uploading = false   // cancel any in-flight upload so it isn't left orphaned
                 },
             )
 
