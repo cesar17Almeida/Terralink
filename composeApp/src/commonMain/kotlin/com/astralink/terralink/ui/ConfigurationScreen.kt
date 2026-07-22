@@ -48,6 +48,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -81,6 +82,10 @@ private const val BLE_NAME_MAX = 20
 // LoRa uplink cadence bounds (s): 5 min .. 24 h. Fair-use keeps this coarse.
 private const val LORA_PERIOD_MIN_S = 300
 private const val LORA_PERIOD_MAX_S = 86_400
+
+// Global sensor capture cadence bounds (s): firmware SAVIA_CAPTURE_MIN_S..SAVIA_SLEEP_MAX_S.
+private const val CAPTURE_MIN_S = 60
+private const val CAPTURE_MAX_S = 86_400
 
 private sealed class ConfigPhase {
     data object Loading : ConfigPhase()
@@ -172,6 +177,7 @@ private fun ConfigReady(
     var committedDaily by remember(snapshot) { mutableStateOf(snapshot.dailyHour) }
     var committedIrr by remember(snapshot) { mutableStateOf(snapshot.irrigationHour) }
     var committedLora by remember(snapshot) { mutableStateOf(snapshot.loraPeriodS) }
+    var committedCapture by remember(snapshot) { mutableStateOf(snapshot.captureS) }
     var committedInfer by remember(snapshot) { mutableStateOf(snapshot.inferenceMode) }
     var committedLat by remember(snapshot) { mutableStateOf(snapshot.lat) }
     var committedLon by remember(snapshot) { mutableStateOf(snapshot.lon) }
@@ -184,6 +190,7 @@ private fun ConfigReady(
     var dailyText by remember(snapshot) { mutableStateOf(snapshot.dailyHour.toString()) }
     var irrText by remember(snapshot) { mutableStateOf(snapshot.irrigationHour.toString()) }
     var loraText by remember(snapshot) { mutableStateOf(snapshot.loraPeriodS.toString()) }
+    var captureText by remember(snapshot) { mutableStateOf(snapshot.captureS.toString()) }
     var inferMode by remember(snapshot) { mutableStateOf(snapshot.inferenceMode) }
     var latText by remember(snapshot) { mutableStateOf(snapshot.lat?.let { fmtCoord(it) } ?: "") }
     var lonText by remember(snapshot) { mutableStateOf(snapshot.lon?.let { fmtCoord(it) } ?: "") }
@@ -210,6 +217,8 @@ private fun ConfigReady(
     val irrValid = irr != null && irr in 0..23
     val lora = loraText.trim().toIntOrNull()
     val loraValid = lora != null && lora in LORA_PERIOD_MIN_S..LORA_PERIOD_MAX_S
+    val capture = captureText.trim().toIntOrNull()
+    val captureValid = capture != null && capture in CAPTURE_MIN_S..CAPTURE_MAX_S
     val lat = latText.trim().toDoubleOrNull()
     val lon = lonText.trim().toDoubleOrNull()
     val coordsBothFilled = latText.isNotBlank() && lonText.isNotBlank()
@@ -217,7 +226,8 @@ private fun ConfigReady(
     val coordsEntryOk = !coordsBothFilled || coordsValid
     val coordsChanged = coordsValid && (lat != committedLat || lon != committedLon)
 
-    val allValid = sleepValid && nameValid && dailyValid && irrValid && loraValid && coordsEntryOk
+    val allValid = sleepValid && nameValid && dailyValid && irrValid && loraValid &&
+        captureValid && coordsEntryOk
     val dirty = (nameValid && nameTrimmed != committedName) ||
         deepSleep != committedDeep ||
         (sleepValid && sleepValue != committedSleep) ||
@@ -226,6 +236,7 @@ private fun ConfigReady(
         (dailyValid && daily != committedDaily) ||
         (irrValid && irr != committedIrr) ||
         (loraValid && lora != committedLora) ||
+        (captureValid && capture != committedCapture) ||
         inferMode != committedInfer ||
         coordsChanged
 
@@ -244,6 +255,7 @@ private fun ConfigReady(
                         dailyHour = if (dailyValid && daily != committedDaily) daily else null,
                         irrigationHour = if (irrValid && irr != committedIrr) irr else null,
                         loraPeriodS = if (loraValid && lora != committedLora) lora else null,
+                        captureS = if (captureValid && capture != committedCapture) capture else null,
                         inferenceMode = if (inferMode != committedInfer) inferMode else null,
                         lat = if (coordsChanged) lat else null,
                         lon = if (coordsChanged) lon else null,
@@ -258,6 +270,7 @@ private fun ConfigReady(
                 committedDaily = applied.dailyHour; dailyText = applied.dailyHour.toString()
                 committedIrr = applied.irrigationHour; irrText = applied.irrigationHour.toString()
                 committedLora = applied.loraPeriodS; loraText = applied.loraPeriodS.toString()
+                committedCapture = applied.captureS; captureText = applied.captureS.toString()
                 committedInfer = applied.inferenceMode; inferMode = applied.inferenceMode
                 committedLat = applied.lat; committedLon = applied.lon
                 latText = applied.lat?.let { fmtCoord(it) } ?: ""
@@ -361,6 +374,9 @@ private fun ConfigReady(
                     loraText = loraText,
                     onLoraChange = { loraText = it.filter { c -> c.isDigit() }; error = null },
                     loraValid = loraValid,
+                    captureText = captureText,
+                    onCaptureChange = { captureText = it.filter { c -> c.isDigit() }; error = null },
+                    captureValid = captureValid,
                 )
 
                 ConfigSection.Energy -> EnergyCard(
@@ -767,6 +783,10 @@ private fun LocalDataCard(count: Long?, deleting: Boolean, onDelete: () -> Unit)
     }
 }
 
+/**
+ * Station detail: one card per concern (identity, schedule, capture, LoRa).
+ * Emitted as siblings so the parent column's 16.dp spacing separates them.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun StationCard(
@@ -783,81 +803,135 @@ private fun StationCard(
     loraText: String,
     onLoraChange: (String) -> Unit,
     loraValid: Boolean,
+    captureText: String,
+    onCaptureChange: (String) -> Unit,
+    captureValid: Boolean,
+) {
+    // -- Identity ------------------------------------------------------------
+    ConfigGroupCard(title = "Identidad") {
+        TerraTextField(
+            value = name,
+            onValueChange = onNameChange,
+            label = "Nombre BLE",
+            isError = name.isNotEmpty() && !nameValid,
+            supportingText = {
+                Text(
+                    if (name.isNotEmpty() && !nameValid) "1 a $BLE_NAME_MAX caracteres"
+                    else "Con el que aparece al buscar por Bluetooth",
+                )
+            },
+        )
+        Spacer(Modifier.height(8.dp))
+        SpecTable(rows = listOf(Spec("Botón de reactivación", "GPIO ${snapshot.wakeGpio}")))
+    }
+
+    // -- Schedule ------------------------------------------------------------
+    ConfigGroupCard(
+        title = "Programación",
+        accent = MaterialTheme.colorScheme.tertiary,
+        subtitle = "Horas en formato 0 a 23, en la hora local del teléfono.",
+    ) {
+        TerraTextField(
+            value = dailyText,
+            onValueChange = onDailyChange,
+            label = "Ciclo diario",
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            isError = dailyText.isNotEmpty() && !dailyValid,
+            supportingText = {
+                Text(
+                    dailyText.trim().toIntOrNull()?.takeIf { it in 0..23 }
+                        ?.let { "Pronóstico e inferencia diaria a las ${fmtHour(it)}" }
+                        ?: "0 a 23",
+                )
+            },
+        )
+        Spacer(Modifier.height(8.dp))
+        TerraTextField(
+            value = irrText,
+            onValueChange = onIrrChange,
+            label = "Hora de riego",
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            isError = irrText.isNotEmpty() && !irrValid,
+            supportingText = {
+                Text(
+                    irrText.trim().toIntOrNull()?.takeIf { it in 0..23 }
+                        ?.let { "Las lecturas se marcan como riego a las ${fmtHour(it)}" }
+                        ?: "0 a 23",
+                )
+            },
+        )
+    }
+
+    // -- Sensor capture ------------------------------------------------------
+    ConfigGroupCard(title = "Captura de sensores") {
+        TerraTextField(
+            value = captureText,
+            onValueChange = onCaptureChange,
+            label = "Cadencia global (segundos)",
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            isError = captureText.isNotEmpty() && !captureValid,
+            supportingText = {
+                if (captureText.isNotEmpty() && !captureValid) {
+                    Text("Entre $CAPTURE_MIN_S s (1 min) y $CAPTURE_MAX_S s (24 h)")
+                } else {
+                    Text(
+                        captureText.trim().toIntOrNull()
+                            ?.let { "Lectura cada ${secondsToHuman(it)}" } ?: "",
+                    )
+                }
+            },
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Los sensores con un intervalo propio configurado ignoran este valor global.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+
+    // -- LoRa ----------------------------------------------------------------
+    ConfigGroupCard(title = "LoRa", accent = MaterialTheme.colorScheme.secondary) {
+        TerraTextField(
+            value = loraText,
+            onValueChange = onLoraChange,
+            label = "Periodo de envío (segundos)",
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            isError = loraText.isNotEmpty() && !loraValid,
+            supportingText = {
+                if (loraText.isNotEmpty() && !loraValid) {
+                    Text("Entre $LORA_PERIOD_MIN_S s (5 min) y $LORA_PERIOD_MAX_S s (24 h)")
+                } else {
+                    Text(
+                        loraText.trim().toIntOrNull()
+                            ?.let { "Envío por radio cada ${secondsToHuman(it)}" } ?: "",
+                    )
+                }
+            },
+        )
+    }
+}
+
+/** Rounded card with a [SectionHeader], optional gray subtitle and 20.dp padding. */
+@Composable
+private fun ConfigGroupCard(
+    title: String,
+    accent: Color = MaterialTheme.colorScheme.primary,
+    subtitle: String? = null,
+    content: @Composable () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
         Column(modifier = Modifier.padding(20.dp)) {
-            SectionHeader("Estación")
-            Spacer(Modifier.height(12.dp))
-            TerraTextField(
-                value = name,
-                onValueChange = onNameChange,
-                label = "Nombre BLE",
-                isError = name.isNotEmpty() && !nameValid,
-                supportingText = {
-                    Text(
-                        if (name.isNotEmpty() && !nameValid) "1 a $BLE_NAME_MAX caracteres"
-                        else "Con el que aparece al buscar por Bluetooth",
-                    )
-                },
-            )
-
-            Spacer(Modifier.height(14.dp))
-            Text("Programación", style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                TerraTextField(
-                    value = dailyText,
-                    onValueChange = onDailyChange,
-                    label = "Ciclo diario (hora local)",
-                    modifier = Modifier.weight(1f),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    isError = dailyText.isNotEmpty() && !dailyValid,
-                    supportingText = { Text(if (dailyText.isNotEmpty() && !dailyValid) "0 a 23" else "h") },
-                )
-                TerraTextField(
-                    value = irrText,
-                    onValueChange = onIrrChange,
-                    label = "Hora de riego",
-                    modifier = Modifier.weight(1f),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    isError = irrText.isNotEmpty() && !irrValid,
-                    supportingText = { Text(if (irrText.isNotEmpty() && !irrValid) "0 a 23" else "h local") },
+            SectionHeader(title, accent = accent)
+            if (subtitle != null) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-
-            Spacer(Modifier.height(14.dp))
-            Text("LoRa", style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(8.dp))
-            TerraTextField(
-                value = loraText,
-                onValueChange = onLoraChange,
-                label = "Periodo de envío (segundos)",
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                isError = loraText.isNotEmpty() && !loraValid,
-                supportingText = {
-                    if (loraText.isNotEmpty() && !loraValid) {
-                        Text("Entre $LORA_PERIOD_MIN_S s (5 min) y $LORA_PERIOD_MAX_S s (24 h)")
-                    } else {
-                        Text(loraText.toIntOrNull()?.let { "= ${secondsToHuman(it)}" } ?: "")
-                    }
-                },
-            )
-
-            Spacer(Modifier.height(14.dp))
-            Text(
-                "Hardware",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(8.dp))
-            SpecTable(
-                rows = listOf(
-                    Spec("Captura", "cada ${secondsToHuman(snapshot.captureS)}"),
-                    Spec("Botón", "GPIO ${snapshot.wakeGpio}"),
-                ),
-            )
+            Spacer(Modifier.height(12.dp))
+            content()
         }
     }
 }
@@ -1129,6 +1203,9 @@ private fun ErrorPanel(message: String, onRetry: () -> Unit) {
         Button(onClick = onRetry) { Text("Reintentar") }
     }
 }
+
+// Hour-of-day (0..23) -> "HH:00".
+private fun fmtHour(h: Int): String = "${h.toString().padStart(2, '0')}:00"
 
 private fun secondsToHuman(s: Int): String = when {
     s % 3600 == 0 && s >= 3600 -> "${s / 3600} h"
