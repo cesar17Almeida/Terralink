@@ -56,6 +56,8 @@ import com.astralink.terralink.ui.components.TerraIcons
 import com.astralink.terralink.ui.components.dismissKeyboardOnTap
 import com.astralink.terralink.util.formatRelativeMs
 import com.astralink.terralink.util.nowMs
+import com.astralink.terralink.util.stationClockText
+import kotlinx.coroutines.delay
 
 private sealed class ConnState {
     data object Connecting : ConnState()
@@ -386,6 +388,18 @@ private fun DeviceStatusCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                // Board clock, ticking each second off the last BLE status read.
+                var clockTick by remember { mutableStateOf(nowMs()) }
+                LaunchedEffect(Unit) {
+                    while (true) { delay(1_000); clockTick = nowMs() }
+                }
+                stationClockText(station, clockTick)?.let { clock ->
+                    Text(
+                        text = clock,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
             LoraSignalGlance(lora = lora, onClick = onLoraClick)
         }

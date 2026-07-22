@@ -40,8 +40,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.astralink.terralink.ble.session.SaviaSession
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.StationsRepository
-import com.astralink.terralink.util.formatRelativeMs
+import com.astralink.terralink.util.hasFreshClock
 import com.astralink.terralink.util.nowMs
+import com.astralink.terralink.util.stationClockText
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -125,7 +126,7 @@ fun StationsListScreen(
                     items(stations, key = { it.bleId }) { station ->
                         StationRow(
                             station = station,
-                            available = station.bleId in seenIds,
+                            available = station.bleId in seenIds || hasFreshClock(station, clockNowMs),
                             nowTickMs = clockNowMs,
                             onClick = { onOpenStation(station) },
                         )
@@ -226,23 +227,4 @@ private fun AvailabilityIndicator(available: Boolean) {
                     else MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
-}
-
-
-/**
- * Board clock line for the home card: the last BLE-read station clock, ticked
- * forward with phone time and shifted to the station's configured UTC offset.
- * Null when the station clock has never been read.
- */
-private fun stationClockText(station: SavedStation, nowTickMs: Long): String? {
-    val clock = station.clockMs ?: return null
-    val readAt = station.clockReadAtMs ?: return null
-    val localMs = clock + (nowTickMs - readAt) + (station.clockOffsetMin ?: 0) * 60_000L
-    val secOfDay = ((localMs / 1000) % 86_400 + 86_400) % 86_400
-    val h = (secOfDay / 3600).toString().padStart(2, '0')
-    val m = ((secOfDay % 3600) / 60).toString().padStart(2, '0')
-    val s = (secOfDay % 60).toString().padStart(2, '0')
-    val stale = nowTickMs - readAt > 60 * 60_000L
-    return "Hora placa $h:$m:$s" +
-        if (stale) " · leída ${formatRelativeMs(readAt, nowTickMs)}" else ""
 }
