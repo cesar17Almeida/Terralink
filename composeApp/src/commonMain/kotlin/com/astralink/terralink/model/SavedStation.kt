@@ -20,4 +20,10 @@ data class SavedStation(
     val lastSyncMs: Long? = null,
     /** Epoch ms of the last on-demand LoRa ping (rate-limits uplinks); null if never. */
     val lastLoraPingMs: Long? = null,
+    /** Board wall clock (epoch ms) at the last status read; null if never seen. */
+    val clockMs: Long? = null,
+    /** Phone time (epoch ms) when [clockMs] was read; ticks the home clock forward. */
+    val clockReadAtMs: Long? = null,
+    /** Station-configured UTC offset (min) at that read; renders its local time. */
+    val clockOffsetMin: Int? = null,
 )

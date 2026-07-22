@@ -188,6 +188,8 @@ data class StatusMsg(
     val fw: String,
     val mode: String? = null,                            // inference mode: "local" | "forward"
     @SerialName("irrigation_hour") val irrigationHour: Int? = null,   // local watering hour
+    @SerialName("now_ms") val nowMs: Long? = null,       // device wall clock, epoch ms (null = unsynced)
+    @SerialName("utc_offset_min") val utcOffsetMin: Int? = null,      // station-configured offset
     @SerialName("uptime_s")
     val uptimeS: Long,
     @SerialName("last_sync_ms")

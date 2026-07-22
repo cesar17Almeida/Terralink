@@ -40,6 +40,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.astralink.terralink.ble.session.SaviaSession
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.StationsRepository
+import com.astralink.terralink.util.formatRelativeMs
+import com.astralink.terralink.util.nowMs
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -58,6 +61,11 @@ fun StationsListScreen(
     var seenIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var refreshing by remember { mutableStateOf(false) }
     var refreshTick by remember { mutableStateOf(0) }
+    // Ticks every second so the per-station board clocks advance live.
+    var clockNowMs by remember { mutableStateOf(nowMs()) }
+    LaunchedEffect(Unit) {
+        while (true) { delay(1_000); clockNowMs = nowMs() }
+    }
 
     // Quick presence scan: every time we land here or pull-to-refresh, listen
     // for SaviaServiceUUID advertisements for PRESENCE_SCAN_MS and remember
@@ -118,6 +126,7 @@ fun StationsListScreen(
                         StationRow(
                             station = station,
                             available = station.bleId in seenIds,
+                            nowTickMs = clockNowMs,
                             onClick = { onOpenStation(station) },
                         )
                     }
@@ -159,6 +168,7 @@ private fun EmptyStationsState() {
 private fun StationRow(
     station: SavedStation,
     available: Boolean,
+    nowTickMs: Long,
     onClick: () -> Unit,
 ) {
     Card(
@@ -183,6 +193,14 @@ private fun StationRow(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                stationClockText(station, nowTickMs)?.let { clock ->
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = clock,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
             AvailabilityIndicator(available = available)
         }
@@ -208,4 +226,23 @@ private fun AvailabilityIndicator(available: Boolean) {
                     else MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
+}
+
+
+/**
+ * Board clock line for the home card: the last BLE-read station clock, ticked
+ * forward with phone time and shifted to the station's configured UTC offset.
+ * Null when the station clock has never been read.
+ */
+private fun stationClockText(station: SavedStation, nowTickMs: Long): String? {
+    val clock = station.clockMs ?: return null
+    val readAt = station.clockReadAtMs ?: return null
+    val localMs = clock + (nowTickMs - readAt) + (station.clockOffsetMin ?: 0) * 60_000L
+    val secOfDay = ((localMs / 1000) % 86_400 + 86_400) % 86_400
+    val h = (secOfDay / 3600).toString().padStart(2, '0')
+    val m = ((secOfDay % 3600) / 60).toString().padStart(2, '0')
+    val s = (secOfDay % 60).toString().padStart(2, '0')
+    val stale = nowTickMs - readAt > 60 * 60_000L
+    return "Hora placa $h:$m:$s" +
+        if (stale) " · leída ${formatRelativeMs(readAt, nowTickMs)}" else ""
 }

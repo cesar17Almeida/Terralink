@@ -65,9 +65,14 @@ private sealed class ConnState {
 }
 
 // setTime + readStatus once we're allowed (open or authenticated).
-private suspend fun readyFrom(active: ActiveSession): ConnState = try {
+private suspend fun readyFrom(active: ActiveSession, bleId: String): ConnState = try {
     runCatching { active.setTime(nowMs()) }
-    ConnState.Ready(active, active.readStatus())
+    val status = active.readStatus()
+    // Remember the board clock so the home list can render it ticking.
+    status.nowMs?.let {
+        StationsRepository.updateClock(bleId, it, nowMs(), status.utcOffsetMin ?: 0)
+    }
+    ConnState.Ready(active, status)
 } catch (e: Throwable) {
     ConnState.Failed(e.message ?: e::class.simpleName ?: "unexpected error")
 }
@@ -105,7 +110,7 @@ fun DeviceScreen(
             val auth = runCatching { active.readAuthState() }.getOrNull()
             // Locked station: prompt for the password before doing anything else.
             if (auth != null && auth.prov && !auth.authed) ConnState.NeedsAuth(active)
-            else readyFrom(active)
+            else readyFrom(active, station.bleId)
         } catch (e: BleError) {
             ConnState.Failed(e.message ?: e::class.simpleName ?: "connection failed")
         } catch (e: Throwable) {
@@ -137,7 +142,7 @@ fun DeviceScreen(
                         scope.launch {
                             val ok = runCatching { s.active.authenticate(pw) }.getOrDefault(false)
                             authSubmitting = false // reset before readyFrom, which may yield Failed
-                            if (ok) state = readyFrom(s.active)
+                            if (ok) state = readyFrom(s.active, station.bleId)
                             else authError = "Contraseña incorrecta"
                         }
                     },

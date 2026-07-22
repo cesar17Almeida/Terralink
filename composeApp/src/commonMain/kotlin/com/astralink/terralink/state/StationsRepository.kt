@@ -89,6 +89,23 @@ object StationsRepository {
         }
     }
 
+    /** Persist the board clock snapshot read over BLE (home renders it ticking). */
+    fun updateClock(bleId: String, clockMs: Long, readAtMs: Long, offsetMin: Int) {
+        requireInitialized()
+        ioScope.launch {
+            store.edit { prefs ->
+                val current = decode(prefs[key])
+                val updated = current.map {
+                    if (it.bleId == bleId)
+                        it.copy(clockMs = clockMs, clockReadAtMs = readAtMs,
+                                clockOffsetMin = offsetMin)
+                    else it
+                }
+                prefs[key] = json.encodeToString(updated)
+            }
+        }
+    }
+
     /** Stamp the last on-demand LoRa ping so the UI can rate-limit uplinks. */
     fun updateLastLoraPing(bleId: String, ms: Long) {
         requireInitialized()
