@@ -268,6 +268,7 @@ fun SensorWizardScreen(
     target: SensorTarget,
     existing: List<SensorInfo>,
     pinmap: PinmapMsg?,
+    pinmapWarning: String?,          // set when the station's pin inventory couldn't be read
     busy: Boolean,
     error: String?,
     onCancel: () -> Unit,
@@ -340,6 +341,7 @@ fun SensorWizardScreen(
                 1 -> PinStep(
                     draft = draft,
                     pinmap = pinmap,
+                    pinmapWarning = pinmapWarning,
                     editPins = editPins,
                     onSelectTrigger = { draft = draft.copy(gpio = it) },
                     onSelectEcho = { draft = draft.copy(gpio2 = it) },
@@ -397,6 +399,7 @@ private fun TypeStep(draft: SensorDraft, onPick: (String) -> Unit) {
 private fun PinStep(
     draft: SensorDraft,
     pinmap: PinmapMsg?,
+    pinmapWarning: String?,
     editPins: Set<Int>,
     onSelectTrigger: (Int) -> Unit,
     onSelectEcho: (Int) -> Unit,
@@ -409,6 +412,9 @@ private fun PinStep(
     val echoCells = remember(pinmap, editPins, draft.gpio) { buildCells(pinmap, editPins, blocked = draft.gpio) }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Without the inventory every pin is drawn free, so say so up front instead
+        // of letting the user pick one the station will refuse.
+        pinmapWarning?.let { WarningCard(it) }
         Text(
             if (two) "El HC-SR04 usa dos pines: trigger (salida) y echo (entrada). Toca un pin para cada uno."
             else "Toca un pin resaltado. ${info.label} necesita un pin $capName.",

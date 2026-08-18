@@ -9,6 +9,7 @@ import com.astralink.terralink.ble.codec.encode
 import com.astralink.terralink.ble.codec.encodeSparse
 import com.astralink.terralink.ble.protocol.Aggregation
 import com.astralink.terralink.ble.protocol.ActuatorRequestMsg
+import com.astralink.terralink.ble.protocol.ActuatorState
 import com.astralink.terralink.ble.protocol.AtRequestMsg
 import com.astralink.terralink.ble.protocol.AtResultMsg
 import com.astralink.terralink.ble.protocol.ConfigClearCoordsMsg
@@ -26,6 +27,7 @@ import com.astralink.terralink.ble.protocol.CHR_AUTH_UUID
 import com.astralink.terralink.ble.protocol.CHR_CONFIG_UUID
 import com.astralink.terralink.ble.protocol.CHR_PINMAP_UUID
 import com.astralink.terralink.ble.protocol.ClearRequestMsg
+import com.astralink.terralink.ble.protocol.ConfigAckMsg
 import com.astralink.terralink.ble.protocol.CHR_DATA_REQUEST_UUID
 import com.astralink.terralink.ble.util.authProof
 import com.astralink.terralink.ble.util.passwordKey
@@ -58,12 +60,14 @@ import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromByteArray
@@ -90,6 +94,21 @@ private const val BLOB_READY_TIMEOUT_MS = 15_000L
 // pathway on the Pi (provision_slot + flip + restart spawn).
 private const val BLOB_FINAL_TIMEOUT_MS = 60_000L
 
+// How long to wait for the station's config ack (config_ok / config_err) after a
+// patch. The firmware validates in-line and answers on the next can-send-now slot,
+// so this only has to cover one connection interval plus a flash save.
+private const val CONFIG_ACK_TIMEOUT_MS = 5_000L
+
+// Enabling notifications is itself a GATT operation (the CCCD write) and the
+// platforms allow one in flight; give it room to land before the config write
+// that follows it, which would otherwise be refused as busy.
+private const val CCCD_SETTLE_MS = 250L
+
+// Confirming an actuator switch: the station only queues it, the supervisor loop
+// drives the GPIO. 12 x 500 ms covers a capture or LoRa cycle already in flight.
+private const val ACT_CONFIRM_TRIES = 12
+private const val ACT_CONFIRM_POLL_MS = 500L
+
 /**
  * Operations on an established GATT connection to Savia. Methods talk
  * the wire protocol defined in `ble/protocol/` and reassemble notify
@@ -112,6 +131,13 @@ class ActiveSession internal constructor(
     private val requestMutex = Mutex()
     private val blobControlFlow: Flow<ByteArray> =
         connection.notifications(CHR_BLOB_CONTROL_UUID)
+
+    // Config writes are confirmed against the station's ack notify, so two of them
+    // must not overlap (each would see the other's ack). Guards the subscription
+    // state below too, which is why it is taken lazily inside the lock.
+    private val configMutex = Mutex()
+    private var configAckNotifications: Flow<ByteArray>? = null
+    private var configAckSubscribed = false
 
     // --- Simple ops --------------------------------------------------------
 
@@ -174,10 +200,40 @@ class ActiveSession internal constructor(
         return SaviaCbor.decodeFromByteArray<AtResultMsg>(chunkedDecode(chunks))
     }
 
-    /** Drive a digital actuator slot ON/OFF (auth-gated). Poll [readStatus] afterwards
-     *  to see the applied state in StatusMsg.act. */
-    suspend fun setActuator(port: Int, on: Boolean) {
-        runDataRequest { connection.write(CHR_DATA_REQUEST_UUID, encode(ActuatorRequestMsg(port = port, on = on))) }
+    /**
+     * Drive a digital actuator slot ON/OFF (auth-gated) and CONFIRM it. The station
+     * answers 1 when it queued the switch and 0 when it refused the port, then
+     * applies it in its supervisor loop -- so the resulting state is polled back and
+     * returned. Throws when the port is not a configured actuator, or when the
+     * station never reports the requested state.
+     */
+    @OptIn(ExperimentalSerializationApi::class)
+    suspend fun setActuator(port: Int, on: Boolean): List<ActuatorState> {
+        val chunks = runDataRequest {
+            connection.write(CHR_DATA_REQUEST_UUID, encode(ActuatorRequestMsg(port = port, on = on)))
+        }
+        // Firmware that predates the meaningful count always answered 1; treat an
+        // undecodable answer the same way and let the confirmation below judge.
+        val queued = runCatching {
+            SaviaCbor.decodeFromByteArray<CountMsg>(chunkedDecode(chunks)).count
+        }.getOrDefault(1L)
+        if (queued == 0L) {
+            throw CodecError(
+                "El puerto $port no es un actuador configurado en la estación. " +
+                    "Revísalo en la lista de sensores."
+            )
+        }
+        // The supervisor cuts its nap short for this, so it usually lands in a few
+        // hundred ms; a capture or LoRa cycle already in flight can delay it.
+        repeat(ACT_CONFIRM_TRIES) {
+            delay(ACT_CONFIRM_POLL_MS)
+            val states = readStatus().act.orEmpty()
+            if (states.firstOrNull { it.port == port }?.on == on) return states
+        }
+        throw CodecError(
+            "La estación aceptó la orden pero el puerto $port sigue sin figurar como " +
+                "${if (on) "ENCENDIDO" else "APAGADO"}. Comprueba el cableado del actuador."
+        )
     }
 
     // --- auth (challenge-response) -----------------------------------------
@@ -283,24 +339,87 @@ class ActiveSession internal constructor(
         decode(connection.read(CHR_PINMAP_UUID))
 
     /**
-     * Apply a config patch (only the changed fields) and read back the resulting
-     * snapshot, so the caller can confirm the station actually applied it.
+     * Apply a config patch (only the changed fields) and CONFIRM it: the station
+     * acks every patch on the config characteristic with `config_ok` or
+     * `config_err` + reason. A rejected patch throws [ConfigRejected] carrying that
+     * reason; only a real success returns the resulting snapshot.
      */
-    suspend fun writeConfig(patch: ConfigPatchMsg): ConfigSnapshotMsg {
+    suspend fun writeConfig(patch: ConfigPatchMsg): ConfigSnapshotMsg =
         // Sparse encode: only the changed fields travel, so a name-only save
         // doesn't carry deep_sleep/sleep_s/etc. (which the firmware could misapply).
-        connection.write(CHR_CONFIG_UUID, encodeSparse(patch))
-        return readConfig()
-    }
+        commitConfig(encodeSparse(patch)) { snapshot -> patch.notAppliedIn(snapshot) }
 
     /**
      * Clear the station's stored coordinates. Sends explicit CBOR `lat: null`/`lon: null`
      * (which the firmware reads as "clear") via [ConfigClearCoordsMsg] -- a normal sparse
-     * patch can't express this because it omits null fields. Reads the snapshot back.
+     * patch can't express this because it omits null fields. Confirmed like any patch.
      */
-    suspend fun clearCoords(): ConfigSnapshotMsg {
-        connection.write(CHR_CONFIG_UUID, encodeSparse(ConfigClearCoordsMsg()))
-        return readConfig()
+    suspend fun clearCoords(): ConfigSnapshotMsg =
+        commitConfig(encodeSparse(ConfigClearCoordsMsg())) { snapshot ->
+            if (snapshot.lat != null || snapshot.lon != null) listOf("el borrado de la ubicación")
+            else emptyList()
+        }
+
+    /**
+     * One config write -> ack cycle. The ack listener is started BEFORE the write
+     * (the notify can beat the write's own completion), and the snapshot is read
+     * back only once the station has spoken.
+     *
+     * When no ack arrives -- a locked station drops the write without answering,
+     * and a build with notify off never sends one -- [notApplied] decides the
+     * verdict from the snapshot itself, so a change that silently didn't land is
+     * still reported instead of being shown as saved.
+     */
+    private suspend fun commitConfig(
+        payload: ByteArray,
+        notApplied: (ConfigSnapshotMsg) -> List<String>,
+    ): ConfigSnapshotMsg = configMutex.withLock {
+        val ackFlow = configAckFlow()
+        val ack = coroutineScope {
+            val waiter = ackFlow?.let { flow ->
+                async {
+                    withTimeoutOrNull(CONFIG_ACK_TIMEOUT_MS) {
+                        flow.mapNotNull { raw -> runCatching { decode<ConfigAckMsg>(raw) }.getOrNull() }
+                            .first { it.op == Op.CONFIG_OK || it.op == Op.CONFIG_ERR }
+                    }
+                }
+            }
+            connection.write(CHR_CONFIG_UUID, payload)
+            waiter?.await()
+        }
+        if (ack?.op == Op.CONFIG_ERR) throw ConfigRejected(ack.msg ?: "invalid")
+
+        val snapshot = readConfig()
+        if (ack == null) {
+            val missing = notApplied(snapshot)
+            if (missing.isNotEmpty()) {
+                // A provisioned station that we never unlocked refuses every write
+                // silently -- name that instead of a vague "didn't apply".
+                if (isLocked()) throw ConfigRejected("auth required")
+                throw ConfigNotApplied(missing)
+            }
+        }
+        snapshot
+    }
+
+    /** True when the station has a password set and this connection hasn't proved it. */
+    private suspend fun isLocked(): Boolean =
+        runCatching { readAuthState() }.getOrNull()?.let { it.prov && !it.authed } ?: false
+
+    /**
+     * Notify flow carrying the config acks, subscribed on first use.
+     *
+     * Deliberately NOT bound at construction like the data/blob flows: the CCCD
+     * write would queue behind theirs during connect, and a refusal there would
+     * break the whole session. Failing to subscribe is not fatal either -- the
+     * caller falls back to checking the snapshot.
+     */
+    private suspend fun configAckFlow(): Flow<ByteArray>? {
+        if (configAckSubscribed) return configAckNotifications
+        configAckSubscribed = true
+        configAckNotifications = runCatching { connection.notifications(CHR_CONFIG_UUID) }.getOrNull()
+        if (configAckNotifications != null) delay(CCCD_SETTLE_MS)
+        return configAckNotifications
     }
 
     /**

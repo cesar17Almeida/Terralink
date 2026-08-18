@@ -24,6 +24,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -71,12 +72,27 @@ fun SensorsScreen(
     var phase by remember { mutableStateOf<SensorsPhase>(SensorsPhase.Loading) }
     var reloadKey by remember { mutableStateOf(0) }
     var pinmap by remember { mutableStateOf<PinmapMsg?>(null) }
+    var pinmapWarning by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(reloadKey) {
         phase = SensorsPhase.Loading
         phase = try {
             val cfg = active.readConfig()
-            pinmap = runCatching { active.readPinmap() }.getOrNull()
+            // The pin inventory is not required to LIST sensors, so its failure
+            // doesn't sink the screen -- but it must not pass unnoticed either: with
+            // no inventory the pinout paints every pin free.
+            try {
+                pinmap = active.readPinmap()
+                pinmapWarning = null
+            } catch (e: Throwable) {
+                pinmap = null
+                pinmapWarning = buildString {
+                    append("No se pudo leer el mapa de pines de la estación")
+                    e.message?.let { append(" ($it)") }
+                    append(". Se mostrarán todos los pines como libres: si eliges uno ")
+                    append("ocupado o reservado, la estación rechazará el sensor al guardar.")
+                }
+            }
             SensorsPhase.Ready(cfg.sensors)
         } catch (e: Throwable) {
             SensorsPhase.Failed(e.message ?: "No se pudieron leer los sensores")
@@ -91,7 +107,8 @@ fun SensorsScreen(
             SensorsError(p.message, onRetry = { reloadKey++ })
         }
         is SensorsPhase.Ready -> SensorsReady(
-            station = station, sensors = p.sensors, pinmap = pinmap, active = active,
+            station = station, sensors = p.sensors, pinmap = pinmap,
+            pinmapWarning = pinmapWarning, active = active,
             openWizardOnStart = openWizardOnStart,
             onOpenConsole = onOpenConsole, onBack = onBack, onReload = { reloadKey++ },
         )
@@ -131,6 +148,7 @@ private fun SensorsReady(
     station: SavedStation,
     sensors: List<SensorInfo>,
     pinmap: PinmapMsg?,
+    pinmapWarning: String?,
     active: ActiveSession,
     openWizardOnStart: Boolean,
     onOpenConsole: () -> Unit,
@@ -162,10 +180,14 @@ private fun SensorsReady(
         sensorError = null
         scope.launch {
             try {
-                active.setActuator(port, on)
-                actStates = runCatching { active.readStatus().act }.getOrNull().orEmpty()
+                // Returns the station's CONFIRMED slot states (it polls until the
+                // supervisor has actually driven the pin), so a valve that never
+                // moved can't render as switched.
+                actStates = active.setActuator(port, on)
             } catch (e: Throwable) {
-                sensorError = e.message ?: "No se pudo cambiar el actuador"
+                val msg = e.message ?: "No se pudo cambiar el actuador"
+                sensorError = msg
+                scope.launch { snackbarHostState.showSnackbar(msg) }
             } finally {
                 togglingActuator = false
             }
@@ -181,7 +203,15 @@ private fun SensorsReady(
                 active.writeConfig(ConfigPatchMsg(sensors = table))
                 onOk()
             } catch (e: Throwable) {
-                sensorError = e.message ?: "No se pudo guardar el sensor"
+                // Carries the station's own reason ("Sensor 2: ese pin ya lo usa otro
+                // sensor"), so show it verbatim -- and in the snackbar too, since the
+                // delete path has no wizard open to host the inline note.
+                val msg = e.message ?: "No se pudo guardar el sensor"
+                sensorError = msg
+                // Detached: showSnackbar suspends until the snackbar is dismissed, and
+                // while the wizard is open its host isn't composed -- awaiting it here
+                // would leave the screen stuck in "guardando".
+                scope.launch { snackbarHostState.showSnackbar(msg) }
             } finally {
                 savingSensors = false
             }
@@ -195,6 +225,7 @@ private fun SensorsReady(
             target = wizardTarget,
             existing = sensors,
             pinmap = pinmap,
+            pinmapWarning = pinmapWarning,
             busy = savingSensors,
             error = sensorError,
             onCancel = { wizard = null; sensorError = null },
@@ -241,6 +272,14 @@ private fun SensorsReady(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 16.dp),
         ) {
+            // Surfaced here too, not only inside the wizard: it changes what the pin
+            // picker is showing, so the user should know before opening it.
+            pinmapWarning?.let {
+                Text(it, color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = onReload) { Text("Reintentar") }
+                Spacer(Modifier.height(4.dp))
+            }
             if (sensors.isEmpty()) {
                 EmptyState(
                     icon = TerraIcons.Sensors,

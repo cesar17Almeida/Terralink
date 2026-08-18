@@ -168,6 +168,11 @@ internal class IosPeripheralDelegate : NSObject(), CBPeripheralDelegateProtocol 
 
     var pendingDiscoverServices: CancellableContinuation<Unit>? = null
     var pendingRead: CancellableContinuation<ByteArray>? = null
+    // Characteristic the pending read targets (lowercase UUID). CoreBluetooth
+    // delivers reads and notifications through the SAME callback, so a
+    // characteristic that is both readable and notifying (config …0013) needs
+    // this to tell its read answer from its ack notify.
+    var pendingReadUuid: String? = null
     var pendingWrite: CancellableContinuation<Unit>? = null
     var pendingL2cap: CancellableContinuation<CBL2CAPChannel>? = null
 
@@ -184,6 +189,7 @@ internal class IosPeripheralDelegate : NSObject(), CBPeripheralDelegateProtocol 
         pendingDiscoverServices = null
         pendingRead?.takeIf { it.isActive }?.resumeWithException(error)
         pendingRead = null
+        pendingReadUuid = null
         pendingWrite?.takeIf { it.isActive }?.resumeWithException(error)
         pendingWrite = null
         pendingL2cap?.takeIf { it.isActive }?.resumeWithException(error)
@@ -232,16 +238,19 @@ internal class IosPeripheralDelegate : NSObject(), CBPeripheralDelegateProtocol 
         error: NSError?,
     ) {
         val char = didUpdateValueForCharacteristic
+        val uuid = char.UUID.UUIDString.lowercase()
         val data = char.value?.toByteArray() ?: ByteArray(0)
-        if (char.isNotifying) {
-            notifyFlows[char.UUID.UUIDString.lowercase()]?.tryEmit(data)
-        } else {
-            val cont = pendingRead
+        // An outstanding read on THIS characteristic owns the value: config (…0013)
+        // is readable AND notifying, so `isNotifying` alone would divert its read
+        // answer into the ack flow and hang readConfig() forever.
+        val cont = pendingRead
+        if (cont != null && cont.isActive && pendingReadUuid == uuid) {
             pendingRead = null
-            if (cont != null && cont.isActive) {
-                if (error != null) cont.resumeWithException(BleError.IoError("read: ${error.localizedDescription}"))
-                else cont.resume(data)
-            }
+            pendingReadUuid = null
+            if (error != null) cont.resumeWithException(BleError.IoError("read: ${error.localizedDescription}"))
+            else cont.resume(data)
+        } else if (char.isNotifying) {
+            notifyFlows[uuid]?.tryEmit(data)
         }
     }
 

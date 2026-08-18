@@ -29,6 +29,7 @@ actual class SaviaConnection internal constructor(
         val char = findCharacteristic(characteristicUuid)
         suspendCancellableCoroutine { cont ->
             delegate.pendingRead = cont
+            delegate.pendingReadUuid = characteristicUuid.lowercase()   // tells reads from notifies
             peripheral.readValueForCharacteristic(char)
         }
     }

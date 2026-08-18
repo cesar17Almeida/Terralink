@@ -280,7 +280,13 @@ private fun ConfigReady(
                         "ahorro ${if (applied.deepSleep) "ON" else "OFF"}",
                 )
             } catch (e: Throwable) {
-                error = e.message ?: "No se pudo guardar la configuración"
+                // Same channel the success path uses: an inline note alone is easy to
+                // miss at the bottom of a long scroll.
+                val msg = e.message ?: "No se pudo guardar la configuración"
+                error = msg
+                // Detached so the button stops spinning immediately instead of
+                // waiting out the snackbar.
+                scope.launch { snackbarHostState.showSnackbar(msg) }
             } finally {
                 saving = false
             }
@@ -297,7 +303,9 @@ private fun ConfigReady(
                 latText = ""; lonText = ""
                 snackbarHostState.showSnackbar("Ubicación borrada ✓")
             } catch (e: Throwable) {
-                error = e.message ?: "No se pudo borrar la ubicación"
+                val msg = e.message ?: "No se pudo borrar la ubicación"
+                error = msg
+                scope.launch { snackbarHostState.showSnackbar(msg) }
             } finally {
                 saving = false
             }
