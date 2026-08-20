@@ -56,8 +56,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.protocol.IngestPoint
-import com.astralink.terralink.ble.protocol.PRED_KIND_IRRIGATION_EVENT
-import com.astralink.terralink.ble.protocol.PRED_MODEL_SCHED
 import com.astralink.terralink.ble.protocol.Prediction
 import com.astralink.terralink.ble.protocol.Reading
 import com.astralink.terralink.ble.protocol.ReadingKind
@@ -68,14 +66,32 @@ import com.astralink.terralink.ui.components.SectionHeader
 import com.astralink.terralink.ui.components.Spec
 import com.astralink.terralink.ui.components.SpecTable
 import com.astralink.terralink.ui.components.TerraDialog
+import com.astralink.terralink.util.formatRelativeMs
 import com.astralink.terralink.util.nowMs
 import kotlinx.coroutines.launch
 
 private const val KIND_HS30_FORECAST = "hs30_forecast"
 private const val KIND_RECOMMENDATION = "water_recommendation"
 
-// The LSTM's past window: 48 h per series (HS10, HS30, TA).
+// The LSTM's past window: 48 HOURLY steps per series. What advances it is a new
+// hour, not a new reading -- everything inside one clock hour is aggregated into a
+// single mean on the station (storage_aggregate_hourly), so readings a minute apart
+// are one step, not sixty.
 private const val WINDOW_HOURS = 48
+private const val HOUR_MS = 3_600_000L
+
+// Real hourly buckets the station requires before it will infer; below this it
+// would be back-filling most of the window from a handful of samples. Mirrors the
+// firmware's LSTM_MIN_PAST_HOURS (savia/lstm_input.h) -- keep the two in step.
+private const val MIN_HOURS = 24
+
+// The firmware refuses to infer unless the hour it is inferring contains a real
+// reading (LSTM_MAX_STALE_HOURS = 0), but it guarantees that by sampling right
+// before it infers -- so this screen, which looks at an arbitrary moment, must NOT
+// mirror that bound or it would cry wolf over the normal gap between captures.
+// This is the loose "the probe looks dead" threshold instead: well past any capture
+// cadence that could feed an hourly model.
+private const val STALE_SOIL_HOURS = 6L
 
 private sealed class PredState {
     data object Loading : PredState()
@@ -92,6 +108,9 @@ fun PredictionsScreen(
 ) {
     var state by remember { mutableStateOf<PredState>(PredState.Loading) }
     var window48 by remember { mutableStateOf<List<Reading>?>(null) }
+    // The LSTM's TA (past + future) comes from the station's weather cache, not from
+    // its readings; the status snapshot is the only thing that reports on it.
+    var weatherUpdatedMs by remember { mutableStateOf<Long?>(null) }
     var refreshing by remember { mutableStateOf(false) }     // soft reload -> fade overlay
     var loadingLabel by remember { mutableStateOf("Cargando…") }
     var logsDialog by remember { mutableStateOf(false) }     // logs modal (opened from a failure)
@@ -108,8 +127,9 @@ fun PredictionsScreen(
         devMode = runCatching { active.readConfig().mockEnabled }.getOrNull() ?: devMode
         val now = nowMs()
         window48 = runCatching {
-            active.requestRawReadings(fromMs = now - 48L * 3_600_000L, toMs = now)
+            active.requestRawReadings(fromMs = now - WINDOW_HOURS * HOUR_MS, toMs = now)
         }.getOrNull()
+        weatherUpdatedMs = runCatching { active.readStatus().weatherUpdatedMs }.getOrNull()
         state = try {
             PredState.Loaded(active.requestPredictions())
         } catch (e: Throwable) {
@@ -167,6 +187,7 @@ fun PredictionsScreen(
                 is PredState.Loaded -> PredictionsContent(
                     predictions = s.predictions,
                     window48 = window48,
+                    weatherUpdatedMs = weatherUpdatedMs,
                     devMode = devMode,
                     onIngest = { point ->
                         runAction("Enviando medida…", "Medida enviada ✓", "No se pudo enviar la medida") {
@@ -291,6 +312,7 @@ private fun LogsDialog(active: ActiveSession, onDismiss: () -> Unit) {
 private fun PredictionsContent(
     predictions: List<Prediction>,
     window48: List<Reading>?,
+    weatherUpdatedMs: Long?,
     devMode: Boolean,
     onIngest: (IngestPoint) -> Unit,
     onMockPred: () -> Unit,
@@ -298,11 +320,6 @@ private fun PredictionsContent(
 ) {
     val forecast = predictions.filter { it.kind == KIND_HS30_FORECAST }.sortedBy { it.tsMs }
     val recommendation = predictions.lastOrNull { it.kind == KIND_RECOMMENDATION }?.value?.toInt()
-    // Scheduler markers (model="sched", kind="irrigation_event") are NOT forecast points:
-    // pull them out and render them as their own badge row instead of on the HS30 chart.
-    val irrigationEvents = predictions
-        .filter { it.model == PRED_MODEL_SCHED && it.kind == PRED_KIND_IRRIGATION_EVENT }
-        .sortedBy { it.tsMs }
 
     Column(
         modifier = Modifier
@@ -311,20 +328,18 @@ private fun PredictionsContent(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        if (window48 != null) InferenceProgressCard(window48, devMode, onIngest)
-
-        if (irrigationEvents.isNotEmpty()) IrrigationEventsCard(irrigationEvents)
+        if (window48 != null) InferenceProgressCard(window48, weatherUpdatedMs, devMode, onIngest)
 
         if (predictions.isEmpty()) {
             Text(
-                "Aún no hay predicciones; se generan en el ciclo diario cuando hay datos suficientes.",
+                "Aún no hay predicciones; se generan a la hora de predicción automática, si hay datos suficientes (Configuración › Modelo e inferencia).",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else if (forecast.isNotEmpty()) {
             LastPredictionCard(forecast = forecast, recommendation = recommendation)
             ForecastCard(forecast)
-        } else if (recommendation != null || irrigationEvents.isEmpty()) {
+        } else {
             RecommendationCard(recommendation)
         }
 
@@ -338,63 +353,50 @@ private fun PredictionsContent(
     }
 }
 
-// Scheduled irrigation events as a badge row (extracted from the prediction stream so
-// they never land on the HS30 forecast chart).
-@Composable
-private fun IrrigationEventsCard(events: List<Prediction>) {
-    ElevatedCard(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
-    ) {
-        Column(modifier = Modifier.padding(20.dp)) {
-            Text("Riegos programados", style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "Momentos en que el planificador prevé regar.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(12.dp))
-            events.forEach { e ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier.size(8.dp).clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.tertiary),
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Text("${formatDateTime(e.tsMs)} UTC", style = MaterialTheme.typography.bodyMedium)
-                    }
-                    Text("Riego", style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.tertiary)
-                }
-                Spacer(Modifier.height(6.dp))
-            }
-        }
-    }
-}
-
 // Build one ingest point at the next still-empty hour of a series (count = how
 // many hours are already filled), so repeated presses walk backwards hour by hour
 // and fill the 48 h window with distinct timestamps the upsert treats as new.
 private fun mockPoint(kind: String, depth: Int, value: Double, count: Int): IngestPoint {
-    val hour = nowMs() / 3_600_000L * 3_600_000L
-    return IngestPoint(tsMs = hour - count.toLong() * 3_600_000L, kind = kind, value = value, depthCm = depth)
+    val hour = nowMs() / HOUR_MS * HOUR_MS
+    return IngestPoint(tsMs = hour - count.toLong() * HOUR_MS, kind = kind, value = value, depthCm = depth)
 }
+
+// How many DISTINCT hourly buckets a series covers inside the window. Counting rows
+// instead would let a station sampling every minute report "48/48" after 48 minutes,
+// because the station folds each clock hour into one mean before the model sees it.
+private fun List<Reading>.hourlyCoverage(kind: String, depth: Int): Int =
+    asSequence()
+        .filter { it.kind == kind && it.depthCm == depth }
+        .map { it.tsMs / HOUR_MS }
+        .distinct()
+        .count()
+
+/** Hours since the newest soil bucket of any depth; null when there is none. */
+private fun List<Reading>.newestSoilAgeHours(): Long? =
+    asSequence()
+        .filter { it.kind == ReadingKind.SOIL_MOISTURE }
+        .maxOfOrNull { it.tsMs / HOUR_MS }
+        ?.let { (nowMs() / HOUR_MS) - it }
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun InferenceProgressCard(window48: List<Reading>, devMode: Boolean, onIngest: (IngestPoint) -> Unit) {
-    val hs10 = window48.count { it.kind == "soil_moisture" && it.depthCm == 10 }
-    val hs30 = window48.count { it.kind == "soil_moisture" && it.depthCm == 30 }
-    val ta = window48.count { it.kind == "air_temperature" }
-    val ready = hs10 >= WINDOW_HOURS && hs30 >= WINDOW_HOURS && ta >= WINDOW_HOURS
+private fun InferenceProgressCard(
+    window48: List<Reading>,
+    weatherUpdatedMs: Long?,
+    devMode: Boolean,
+    onIngest: (IngestPoint) -> Unit,
+) {
+    val hs10 = window48.hourlyCoverage(ReadingKind.SOIL_MOISTURE, 10)
+    val hs30 = window48.hourlyCoverage(ReadingKind.SOIL_MOISTURE, 30)
+    // TA (past 48 h AND the next 24 h) is not measured here: it comes from the
+    // weather cache the backend pushes over LoRa/BLE, and the station refuses to
+    // infer without a full one. All the app can see of it is when it last landed.
+    val hasForecast = weatherUpdatedMs != null
+    // Coverage counts how MUCH of the window is real, never how recent: a probe that
+    // died hours ago still scores high and would otherwise read as "listo".
+    val soilAge = window48.newestSoilAgeHours()
+    val soilStale = soilAge != null && soilAge > STALE_SOIL_HOURS
+    val ready = hs10 >= MIN_HOURS && hs30 >= MIN_HOURS && hasForecast && !soilStale
 
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
@@ -406,8 +408,12 @@ private fun InferenceProgressCard(window48: List<Reading>, devMode: Boolean, onI
                 fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(4.dp))
             Text(
-                text = if (ready) "Listo: las 3 series tienen sus 48 h"
-                       else "El LSTM necesita 48 h por serie (HS10, HS30 y TA)",
+                text = when {
+                    ready -> "Listo para inferir"
+                    soilStale -> "La sonda no da lecturas desde hace $soilAge h"
+                    !hasForecast -> "Falta el pronóstico de temperatura del aire"
+                    else -> "El LSTM necesita al menos $MIN_HOURS h reales de humedad"
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -416,13 +422,39 @@ private fun InferenceProgressCard(window48: List<Reading>, devMode: Boolean, onI
             Spacer(Modifier.height(12.dp))
             SeriesRow("HS30 · humedad 30 cm", hs30, WINDOW_HOURS)
             Spacer(Modifier.height(12.dp))
-            SeriesRow("TA · temperatura del aire", ta, WINDOW_HOURS)
+            ForecastRow(weatherUpdatedMs)
+            Spacer(Modifier.height(12.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Última lectura de suelo", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    text = when {
+                        soilAge == null -> "ninguna"
+                        soilAge <= 0L -> "esta hora"
+                        soilAge == 1L -> "hace 1 h"
+                        else -> "hace $soilAge h"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (soilStale || soilAge == null) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Cada paso es una hora de reloj: las lecturas de una misma hora se " +
+                    "promedian en un solo valor. Por debajo de $MIN_HOURS h la estación no " +
+                    "infiere, y hasta las $WINDOW_HOURS h rellena los huecos con el último valor.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
             if (devMode) {
                 Spacer(Modifier.height(16.dp))
                 Text("Enviar una medida (dev · ingest)", style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(6.dp))
+                // No TA button: the model reads air temperature from the weather
+                // cache, so ingesting an air_temperature reading would move this
+                // card without moving the inference.
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
                         onClick = { onIngest(mockPoint(ReadingKind.SOIL_MOISTURE, 10, 0.70, hs10)) },
@@ -432,13 +464,24 @@ private fun InferenceProgressCard(window48: List<Reading>, devMode: Boolean, onI
                         onClick = { onIngest(mockPoint(ReadingKind.SOIL_MOISTURE, 30, 0.74, hs30)) },
                         enabled = hs30 < WINDOW_HOURS, modifier = Modifier.weight(1f),
                     ) { Text("+ HS30") }
-                    OutlinedButton(
-                        onClick = { onIngest(mockPoint(ReadingKind.AIR_TEMPERATURE, 0, 22.0, ta)) },
-                        enabled = ta < WINDOW_HOURS, modifier = Modifier.weight(1f),
-                    ) { Text("+ TA") }
                 }
             }
         }
+    }
+}
+
+/** The TA window (48 h past + 24 h forecast). It is delivered whole or not at all,
+ *  so it reports availability and age rather than a count. */
+@Composable
+private fun ForecastRow(updatedMs: Long?) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text("TA · pronóstico 48 h + 24 h", style = MaterialTheme.typography.bodyMedium)
+        Text(
+            text = if (updatedMs != null) formatRelativeMs(updatedMs) else "sin pronóstico",
+            style = MaterialTheme.typography.bodySmall,
+            color = if (updatedMs != null) MaterialTheme.colorScheme.onSurfaceVariant
+                    else MaterialTheme.colorScheme.error,
+        )
     }
 }
 
@@ -473,9 +516,6 @@ private fun SeriesRow(label: String, taken: Int, target: Int) {
     }
 }
 
-// The headline view of the most recent inference: its recommendation plus the
-// data it reported (model, horizon, HS30 next/min/max, confidence). The full
-// hour-by-hour series follows in ForecastCard.
 @Composable
 private fun LastPredictionCard(forecast: List<Prediction>, recommendation: Int?) {
     val values = forecast.map { it.value }

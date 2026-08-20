@@ -39,7 +39,3 @@ object SensorType {
     const val ACTUATOR = "actuator"                  // 1 digital output; no readings, manual ON/OFF
 }
 
-// Model tokens that flag a prediction row as a scheduled irrigation event marker
-// (model="sched", kind="irrigation_event") rather than a forecast point.
-const val PRED_MODEL_SCHED = "sched"
-const val PRED_KIND_IRRIGATION_EVENT = "irrigation_event"
