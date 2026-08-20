@@ -118,10 +118,25 @@ class CborTest {
     @Test
     fun configPatchOmitsNewFieldsWhenNameOnly() {
         val text = encodeSparse(ConfigPatchMsg(name = "Parcela 3")).decodeToString()
-        listOf("lat", "lon", "inference_mode", "utc_offset_min", "irrigation_hour",
-            "lora_period_s", "daily_hour").forEach {
+        listOf("lat", "lon", "inference_mode", "utc_offset_min",
+            "lora_period_s", "daily_hour", "daily_min").forEach {
             assertFalse(text.contains(it), "$it must be omitted when unchanged")
         }
+    }
+
+    // The daily time is two independent fields: saving only the minute must not drag
+    // the hour along (and vice versa), so a patch carries exactly what changed.
+    @Test
+    fun configPatchCarriesDailyHourAndMinuteIndependently() {
+        val minuteOnly = encodeSparse(ConfigPatchMsg(dailyMin = 30))
+        assertTrue(minuteOnly.decodeToString().contains("daily_min"))
+        assertFalse(minuteOnly.decodeToString().contains("daily_hour"))
+        assertEquals(30, decode<ConfigPatchMsg>(minuteOnly).dailyMin)
+        assertEquals(null, decode<ConfigPatchMsg>(minuteOnly).dailyHour)
+
+        val both = decode<ConfigPatchMsg>(encodeSparse(ConfigPatchMsg(dailyHour = 6, dailyMin = 0)))
+        assertEquals(6, both.dailyHour)
+        assertEquals(0, both.dailyMin)
     }
 
     // Setting coords sends both lat + lon as numbers.
@@ -165,7 +180,6 @@ class CborTest {
             inferenceMode = "local",
             inferDev = true,
             utcOffsetMin = -180,   // negative offset must survive
-            irrigationHour = 7,
             lat = 39.47,
             lon = -0.37,
             sensors = listOf(

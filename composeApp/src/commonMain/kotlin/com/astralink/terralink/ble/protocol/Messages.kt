@@ -187,7 +187,6 @@ data class StatusMsg(
     val v: Int,
     val fw: String,
     val mode: String? = null,                            // inference mode: "local" | "forward"
-    @SerialName("irrigation_hour") val irrigationHour: Int? = null,   // local watering hour
     @SerialName("now_ms") val nowMs: Long? = null,       // device wall clock, epoch ms (null = unsynced)
     @SerialName("utc_offset_min") val utcOffsetMin: Int? = null,      // station-configured offset
     @SerialName("uptime_s")
@@ -263,11 +262,18 @@ data class ChannelInfo(
     @SerialName("depth_cm") val depthCm: Int = 0,
 )
 
+/** Sensor slots the station exposes; mirrors SAVIA_MAX_SENSORS in the firmware. */
+const val MAX_SENSOR_SLOTS = 6
+
 /**
  * One configured sensor slot, as the firmware serialises it (…0013). The base
  * fields are always present; the decoding fields appear per type (analog ->
  * kind/depth/scale/offset, 1-Wire -> kind/depth, SDI-12 generic -> chan[]). The
  * extra fields let the wizard re-open a sensor for editing without losing them.
+ *
+ * Only OCCUPIED slots travel, each tagged with its `port`: the station's table is
+ * slot-addressed, so a deleted sensor leaves a hole and the ports after it keep
+ * their numbers. Never infer the port from this list's index.
  */
 @Serializable
 data class SensorInfo(
@@ -301,7 +307,8 @@ data class ConfigSnapshotMsg(
     @SerialName("sleep_s") val sleepS: Int,
     @SerialName("deep_sleep") val deepSleep: Boolean,
     @SerialName("capture_s") val captureS: Int = 3600,   // capture cadence (s)
-    @SerialName("daily_hour") val dailyHour: Int = 20,   // UTC hour of the daily cycle
+    @SerialName("daily_hour") val dailyHour: Int = 20,   // LOCAL hour of the daily cycle
+    @SerialName("daily_min") val dailyMin: Int = 0,      // minute within dailyHour
     @SerialName("mock") val mockEnabled: Boolean = true, // dev: mock data generator
     @SerialName("log_level") val logLevel: Int = 1,      // 0=debug, 1=info
     @SerialName("wake_gpio") val wakeGpio: Int,
@@ -309,7 +316,6 @@ data class ConfigSnapshotMsg(
     @SerialName("inference_mode") val inferenceMode: String = "forward", // "local" | "forward"
     @SerialName("infer_dev") val inferDev: Boolean = false,       // build supports on-device inference (RO)
     @SerialName("utc_offset_min") val utcOffsetMin: Int = 0,      // station's local UTC offset (may be negative)
-    @SerialName("irrigation_hour") val irrigationHour: Int = 6,   // local hour the scheduler waters
     val lat: Double? = null,                             // station coordinates (null = unset)
     val lon: Double? = null,
     val sensors: List<SensorInfo> = emptyList(),
@@ -324,13 +330,19 @@ data class ChannelPatch(
 )
 
 /**
- * One sensor in a config-patch `sensors[]` table. `gpio`/`type` are always sent;
- * the rest are per-type and omitted when null (sparse). Mirrors the firmware's
+ * One sensor in a config-patch `sensors[]` table. `port`/`gpio`/`type` are always
+ * sent; the rest are per-type and omitted when null (sparse). Mirrors the firmware's
  * parse_sensor_slot: addr (SDI-12), interval_s (cadence, 0/omitted = global),
  * kind/depth_cm + scale/offset (analog), kind/depth_cm (1-Wire), chan[] (generic).
+ *
+ * `port` names the SLOT this sensor occupies (1..[MAX_SENSOR_SLOTS]) rather than
+ * letting array position decide it. Without it, deleting a sensor would shift every
+ * sensor after it down a port -- and since readings are keyed by port both here and
+ * on the station, the survivors would inherit the deleted sensor's history.
  */
 @Serializable
 data class SensorPatch(
+    val port: Int,
     val gpio: Int,
     val type: String,
     val addr: String? = null,
@@ -363,12 +375,12 @@ data class ConfigPatchMsg(
     @SerialName("deep_sleep") val deepSleep: Boolean? = null,
     @SerialName("capture_s") val captureS: Int? = null,
     @SerialName("daily_hour") val dailyHour: Int? = null,
+    @SerialName("daily_min") val dailyMin: Int? = null,
     @SerialName("mock") val mock: Boolean? = null,
     @SerialName("log_level") val logLevel: Int? = null,
     @SerialName("lora_period_s") val loraPeriodS: Int? = null,
     @SerialName("inference_mode") val inferenceMode: String? = null,   // "local" | "forward"
     @SerialName("utc_offset_min") val utcOffsetMin: Int? = null,       // may be negative
-    @SerialName("irrigation_hour") val irrigationHour: Int? = null,
     // Coords: send lat + lon TOGETHER as numbers to set. Both stay null here (and are
     // omitted by the sparse encoder) when unchanged -- CLEARING requires explicit CBOR
     // nulls, which the sparse encoder can't emit, so use [ConfigClearCoordsMsg] instead.
@@ -409,12 +421,18 @@ data class PinmapMsg(
     val pins: List<PinEntry> = emptyList(),
 )
 
-/** data_request: wipe stored data (dev). Replies with {count:0} on data_response. */
+/**
+ * data_request: wipe stored data. With `port` null it wipes everything (dev) and
+ * replies {count:0}; with a port it drops only that sensor's readings and replies
+ * with how many it removed. The scoped form runs when a sensor is deleted and the
+ * installer chooses not to keep its data -- the port is about to be reusable.
+ */
 @Serializable
 data class ClearRequestMsg(
     val v: Int = PROTOCOL_VERSION,
     val op: String = Op.CLEAR,
     val kind: String = "raw",
+    val port: Int? = null,
 )
 
 /**

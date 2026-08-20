@@ -6,6 +6,8 @@ package com.astralink.terralink.ble.session
 
 import com.astralink.terralink.ble.protocol.ConfigPatchMsg
 import com.astralink.terralink.ble.protocol.ConfigSnapshotMsg
+import com.astralink.terralink.util.formatTimeOfDay
+import com.astralink.terralink.util.secondsToHuman
 import kotlin.math.abs
 
 /** The station received the patch and refused it. [raw] is the firmware's own reason. */
@@ -28,14 +30,14 @@ private val FIELD_ERRORS = mapOf(
     "auth required" to "La estación está bloqueada: introduce la contraseña antes de guardar.",
     "sleep_s out of range" to "Tiempo de sueño fuera de rango (10 s – 24 h).",
     "capture_s out of range" to "Cadencia de captura fuera de rango (60 s – 24 h).",
-    "daily_hour out of range" to "Hora del ciclo diario fuera de rango (0–23).",
+    "daily_hour out of range" to "Hora de predicción fuera de rango (0–23).",
+    "daily_min out of range" to "Minuto de predicción fuera de rango (0–59).",
     "name empty" to "El nombre de la estación no puede estar vacío.",
     "log_level out of range" to "Nivel de registro inválido (0 = depuración, 1 = info).",
     "lora_period_s out of range" to "Periodo de LoRa fuera de rango (5 min – 24 h).",
     "no_local_inference" to "Este firmware no lleva el modelo embebido: no puede inferir en la propia " +
         "estación. Deja el modo en «Reenviar» o flashea una compilación con inferencia.",
     "utc_offset out of range" to "Desfase horario fuera de rango (UTC−12:00 … UTC+14:00).",
-    "irrigation_hour out of range" to "Hora de riego fuera de rango (0–23).",
     "coords out of range" to "Coordenadas fuera de rango.",
     "coords need lat+lon" to "Hay que enviar latitud y longitud juntas.",
 )
@@ -88,13 +90,13 @@ internal fun ConfigPatchMsg.notAppliedIn(snapshot: ConfigSnapshotMsg): List<Stri
     check(sleepS, snapshot.sleepS, "el tiempo de sueño")
     check(deepSleep, snapshot.deepSleep, "el ahorro de energía")
     check(captureS, snapshot.captureS, "la cadencia de captura")
-    check(dailyHour, snapshot.dailyHour, "la hora del ciclo diario")
+    check(dailyHour, snapshot.dailyHour, "la hora de predicción")
+    check(dailyMin, snapshot.dailyMin, "el minuto de predicción")
     check(mock, snapshot.mockEnabled, "el modo de datos simulados")
     check(logLevel, snapshot.logLevel, "el nivel de registro")
     check(loraPeriodS, snapshot.loraPeriodS, "el periodo de LoRa")
     check(inferenceMode, snapshot.inferenceMode, "el modo de inferencia")
     check(utcOffsetMin, snapshot.utcOffsetMin, "el desfase horario")
-    check(irrigationHour, snapshot.irrigationHour, "la hora de riego")
 
     val askedLat = lat
     val askedLon = lon
@@ -109,16 +111,61 @@ internal fun ConfigPatchMsg.notAppliedIn(snapshot: ConfigSnapshotMsg): List<Stri
     }
 
     // Sensors are swapped as a whole table; compare the identity of each slot
-    // (type + pins), which is what a rejection would have left untouched.
+    // (type + pins), which is what a rejection would have left untouched. Matched
+    // BY PORT, not by list position: the port is the slot the sensor was asked to
+    // occupy, so a station that placed it somewhere else has not applied the patch
+    // -- and comparing positionally would call that a success.
     val askedSensors = sensors
     if (askedSensors != null) {
-        val got = snapshot.sensors
-        val same = askedSensors.size == got.size && askedSensors.indices.all { i ->
-            askedSensors[i].type == got[i].type &&
-                askedSensors[i].gpio == got[i].gpio &&
-                askedSensors[i].gpio2 == got[i].gpio2
+        val got = snapshot.sensors.associateBy { it.port }
+        val same = askedSensors.size == snapshot.sensors.size && askedSensors.all { asked ->
+            val g = got[asked.port]
+            g != null && asked.type == g.type && asked.gpio == g.gpio && asked.gpio2 == g.gpio2
         }
         if (!same) missing.add("los sensores")
     }
     return missing
 }
+
+// --- what a save actually changed --------------------------------------------
+
+/** How many changes the confirmation names before collapsing to a count. */
+private const val SUMMARY_MAX_PARTS = 3
+
+/**
+ * Confirmation text for a saved patch, naming ONLY the settings that travelled.
+ * Values are read from [snapshot] -- the station's confirmed state -- so the text
+ * reports what the station now holds, not what the app asked for.
+ *
+ * A patch is sparse (see ActiveSession.writeConfig): a save that only moved the
+ * prediction time carries nothing else, and the confirmation must say nothing
+ * else either. Naming untouched settings reads as if they had been rewritten.
+ */
+internal fun ConfigPatchMsg.appliedSummary(snapshot: ConfigSnapshotMsg): String {
+    val parts = mutableListOf<String>()
+    if (name != null) parts += "nombre «${snapshot.name}»"
+    if (dailyHour != null || dailyMin != null) {
+        parts += "predicción a las ${formatTimeOfDay(snapshot.dailyHour, snapshot.dailyMin)}"
+    }
+    if (inferenceMode != null) {
+        parts += if (snapshot.inferenceMode == "local") "modelo en la estación"
+                 else "modelo en la nube/app"
+    }
+    if (deepSleep != null) parts += "ahorro ${onOff(snapshot.deepSleep)}"
+    if (sleepS != null) parts += "sueño ${secondsToHuman(snapshot.sleepS)}"
+    if (captureS != null) parts += "captura cada ${secondsToHuman(snapshot.captureS)}"
+    if (loraPeriodS != null) parts += "LoRa cada ${secondsToHuman(snapshot.loraPeriodS)}"
+    if (lat != null && lon != null) parts += "ubicación"
+    if (sensors != null) parts += "sensores"
+    if (mock != null) parts += "datos simulados ${onOff(snapshot.mockEnabled)}"
+    if (logLevel != null) parts += "logs ${if (snapshot.logLevel == 0) "Debug" else "Info"}"
+    // utcOffsetMin is written silently on connect, never as part of a user save.
+
+    return when {
+        parts.isEmpty() -> "Sin cambios que guardar"
+        parts.size <= SUMMARY_MAX_PARTS -> "Aplicado ✓ · " + parts.joinToString(" · ")
+        else -> "Aplicado ✓ · ${parts.size} ajustes"
+    }
+}
+
+private fun onOff(v: Boolean) = if (v) "ON" else "OFF"

@@ -35,6 +35,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -56,6 +57,7 @@ import com.astralink.terralink.ble.protocol.ConfigPatchMsg
 import com.astralink.terralink.ble.protocol.ConfigSnapshotMsg
 import com.astralink.terralink.ble.protocol.DeviceInfo
 import com.astralink.terralink.ble.session.ActiveSession
+import com.astralink.terralink.ble.session.appliedSummary
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.ReadingsRepository
 import com.astralink.terralink.ui.components.BackIconButton
@@ -68,7 +70,10 @@ import com.astralink.terralink.ui.components.SpecTable
 import com.astralink.terralink.ui.components.TerraDialog
 import com.astralink.terralink.ui.components.TerraIcons
 import com.astralink.terralink.ui.components.TerraTextField
+import com.astralink.terralink.ui.components.rememberTimeOfDayPicker
 import com.astralink.terralink.ui.components.dismissKeyboardOnTap
+import com.astralink.terralink.util.formatTimeOfDay
+import com.astralink.terralink.util.secondsToHuman
 import com.astralink.terralink.util.systemUtcOffsetMinutes
 import kotlinx.coroutines.launch
 
@@ -159,8 +164,8 @@ private fun ConfigReady(
         cachedCount = runCatching { ReadingsRepository.countByStation(station.bleId) }.getOrNull()
     }
 
-    // On connect, keep the station's UTC offset aligned with the phone's so daily_hour /
-    // irrigation_hour are interpreted in local time. Silent: only utc_offset_min travels.
+    // On connect, keep the station's UTC offset aligned with the phone's so daily_hour
+    // is interpreted in local time. Silent: only utc_offset_min travels.
     LaunchedEffect(snapshot) {
         val sysOffset = systemUtcOffsetMinutes()
         if (snapshot.utcOffsetMin != sysOffset) {
@@ -175,7 +180,7 @@ private fun ConfigReady(
     var committedMock by remember(snapshot) { mutableStateOf(snapshot.mockEnabled) }
     var committedLog by remember(snapshot) { mutableStateOf(snapshot.logLevel) }
     var committedDaily by remember(snapshot) { mutableStateOf(snapshot.dailyHour) }
-    var committedIrr by remember(snapshot) { mutableStateOf(snapshot.irrigationHour) }
+    var committedDailyMin by remember(snapshot) { mutableStateOf(snapshot.dailyMin) }
     var committedLora by remember(snapshot) { mutableStateOf(snapshot.loraPeriodS) }
     var committedCapture by remember(snapshot) { mutableStateOf(snapshot.captureS) }
     var committedInfer by remember(snapshot) { mutableStateOf(snapshot.inferenceMode) }
@@ -187,8 +192,8 @@ private fun ConfigReady(
     var sleepText by remember(snapshot) { mutableStateOf(snapshot.sleepS.toString()) }
     var mockEnabled by remember(snapshot) { mutableStateOf(snapshot.mockEnabled) }
     var logLevel by remember(snapshot) { mutableStateOf(snapshot.logLevel) }
-    var dailyText by remember(snapshot) { mutableStateOf(snapshot.dailyHour.toString()) }
-    var irrText by remember(snapshot) { mutableStateOf(snapshot.irrigationHour.toString()) }
+    var dailyHour by remember(snapshot) { mutableStateOf(snapshot.dailyHour) }
+    var dailyMin by remember(snapshot) { mutableStateOf(snapshot.dailyMin) }
     var loraText by remember(snapshot) { mutableStateOf(snapshot.loraPeriodS.toString()) }
     var captureText by remember(snapshot) { mutableStateOf(snapshot.captureS.toString()) }
     var inferMode by remember(snapshot) { mutableStateOf(snapshot.inferenceMode) }
@@ -211,10 +216,6 @@ private fun ConfigReady(
     val sleepValid = sleepValue != null && sleepValue in SLEEP_MIN_S..SLEEP_MAX_S
     val nameTrimmed = nameText.trim()
     val nameValid = nameTrimmed.isNotEmpty() && nameTrimmed.length <= BLE_NAME_MAX
-    val daily = dailyText.trim().toIntOrNull()
-    val dailyValid = daily != null && daily in 0..23
-    val irr = irrText.trim().toIntOrNull()
-    val irrValid = irr != null && irr in 0..23
     val lora = loraText.trim().toIntOrNull()
     val loraValid = lora != null && lora in LORA_PERIOD_MIN_S..LORA_PERIOD_MAX_S
     val capture = captureText.trim().toIntOrNull()
@@ -226,15 +227,14 @@ private fun ConfigReady(
     val coordsEntryOk = !coordsBothFilled || coordsValid
     val coordsChanged = coordsValid && (lat != committedLat || lon != committedLon)
 
-    val allValid = sleepValid && nameValid && dailyValid && irrValid && loraValid &&
+    val allValid = sleepValid && nameValid && loraValid &&
         captureValid && coordsEntryOk
     val dirty = (nameValid && nameTrimmed != committedName) ||
         deepSleep != committedDeep ||
         (sleepValid && sleepValue != committedSleep) ||
         mockEnabled != committedMock ||
         logLevel != committedLog ||
-        (dailyValid && daily != committedDaily) ||
-        (irrValid && irr != committedIrr) ||
+        dailyHour != committedDaily || dailyMin != committedDailyMin ||
         (loraValid && lora != committedLora) ||
         (captureValid && capture != committedCapture) ||
         inferMode != committedInfer ||
@@ -245,40 +245,38 @@ private fun ConfigReady(
         error = null
         scope.launch {
             try {
-                val applied = active.writeConfig(
-                    ConfigPatchMsg(
-                        name = nameTrimmed.takeIf { nameValid && it != committedName },
-                        sleepS = if (sleepValid && sleepValue != committedSleep) sleepValue else null,
-                        deepSleep = if (deepSleep != committedDeep) deepSleep else null,
-                        mock = if (mockEnabled != committedMock) mockEnabled else null,
-                        logLevel = if (logLevel != committedLog) logLevel else null,
-                        dailyHour = if (dailyValid && daily != committedDaily) daily else null,
-                        irrigationHour = if (irrValid && irr != committedIrr) irr else null,
-                        loraPeriodS = if (loraValid && lora != committedLora) lora else null,
-                        captureS = if (captureValid && capture != committedCapture) capture else null,
-                        inferenceMode = if (inferMode != committedInfer) inferMode else null,
-                        lat = if (coordsChanged) lat else null,
-                        lon = if (coordsChanged) lon else null,
-                    ),
+                // Sparse on purpose: every field stays null unless it differs from the
+                // value the station confirmed last, so a save carries only what moved.
+                val patch = ConfigPatchMsg(
+                    name = nameTrimmed.takeIf { nameValid && it != committedName },
+                    sleepS = if (sleepValid && sleepValue != committedSleep) sleepValue else null,
+                    deepSleep = if (deepSleep != committedDeep) deepSleep else null,
+                    mock = if (mockEnabled != committedMock) mockEnabled else null,
+                    logLevel = if (logLevel != committedLog) logLevel else null,
+                    dailyHour = if (dailyHour != committedDaily) dailyHour else null,
+                    dailyMin = if (dailyMin != committedDailyMin) dailyMin else null,
+                    loraPeriodS = if (loraValid && lora != committedLora) lora else null,
+                    captureS = if (captureValid && capture != committedCapture) capture else null,
+                    inferenceMode = if (inferMode != committedInfer) inferMode else null,
+                    lat = if (coordsChanged) lat else null,
+                    lon = if (coordsChanged) lon else null,
                 )
+                val applied = active.writeConfig(patch)
                 // Reflect the station's CONFIRMED state (this clears "dirty").
                 committedName = applied.name; nameText = applied.name
                 committedSleep = applied.sleepS; sleepText = applied.sleepS.toString()
                 committedDeep = applied.deepSleep; deepSleep = applied.deepSleep
                 committedMock = applied.mockEnabled; mockEnabled = applied.mockEnabled
                 committedLog = applied.logLevel; logLevel = applied.logLevel
-                committedDaily = applied.dailyHour; dailyText = applied.dailyHour.toString()
-                committedIrr = applied.irrigationHour; irrText = applied.irrigationHour.toString()
+                committedDaily = applied.dailyHour; dailyHour = applied.dailyHour
+                committedDailyMin = applied.dailyMin; dailyMin = applied.dailyMin
                 committedLora = applied.loraPeriodS; loraText = applied.loraPeriodS.toString()
                 committedCapture = applied.captureS; captureText = applied.captureS.toString()
                 committedInfer = applied.inferenceMode; inferMode = applied.inferenceMode
                 committedLat = applied.lat; committedLon = applied.lon
                 latText = applied.lat?.let { fmtCoord(it) } ?: ""
                 lonText = applied.lon?.let { fmtCoord(it) } ?: ""
-                snackbarHostState.showSnackbar(
-                    "Aplicado ✓ · sueño ${secondsToHuman(applied.sleepS)} · " +
-                        "ahorro ${if (applied.deepSleep) "ON" else "OFF"}",
-                )
+                snackbarHostState.showSnackbar(patch.appliedSummary(applied))
             } catch (e: Throwable) {
                 // Same channel the success path uses: an inline note alone is easy to
                 // miss at the bottom of a long scroll.
@@ -361,6 +359,8 @@ private fun ConfigReady(
                     deepSleep = deepSleep,
                     mockEnabled = mockEnabled,
                     inferMode = committedInfer,
+                    dailyHour = committedDaily,
+                    dailyMin = committedDailyMin,
                     hasCoords = committedLat != null && committedLon != null,
                     prov = prov,
                     localCount = cachedCount,
@@ -373,12 +373,6 @@ private fun ConfigReady(
                     name = nameText,
                     onNameChange = { nameText = it.take(BLE_NAME_MAX); error = null },
                     nameValid = nameValid,
-                    dailyText = dailyText,
-                    onDailyChange = { dailyText = it.filter { c -> c.isDigit() }.take(2); error = null },
-                    dailyValid = dailyValid,
-                    irrText = irrText,
-                    onIrrChange = { irrText = it.filter { c -> c.isDigit() }.take(2); error = null },
-                    irrValid = irrValid,
                     loraText = loraText,
                     onLoraChange = { loraText = it.filter { c -> c.isDigit() }; error = null },
                     loraValid = loraValid,
@@ -401,6 +395,9 @@ private fun ConfigReady(
                     inferMode = inferMode,
                     inferDev = snapshot.inferDev,
                     onSelect = { inferMode = it; error = null },
+                    dailyHour = dailyHour,
+                    dailyMin = dailyMin,
+                    onDailyChange = { h, m -> dailyHour = h; dailyMin = m; error = null },
                 )
 
                 ConfigSection.Location -> LocationCard(
@@ -537,6 +534,8 @@ private fun ConfigHome(
     deepSleep: Boolean,
     mockEnabled: Boolean,
     inferMode: String,
+    dailyHour: Int,
+    dailyMin: Int,
     hasCoords: Boolean,
     prov: Boolean?,
     localCount: Long?,
@@ -569,7 +568,8 @@ private fun ConfigHome(
             SettingsRowSpec(
                 icon = TerraIcons.Memory,
                 title = "Modelo e inferencia",
-                value = if (inferMode == "local") "En el dispositivo" else "En la nube/app",
+                value = if (inferMode == "local") "En el dispositivo · ${formatTimeOfDay(dailyHour, dailyMin)}"
+                        else "En la nube/app",
                 container = scheme.secondaryContainer,
                 content = scheme.onSecondaryContainer,
                 onClick = { onOpen(ConfigSection.Model) },
@@ -802,12 +802,6 @@ private fun StationCard(
     name: String,
     onNameChange: (String) -> Unit,
     nameValid: Boolean,
-    dailyText: String,
-    onDailyChange: (String) -> Unit,
-    dailyValid: Boolean,
-    irrText: String,
-    onIrrChange: (String) -> Unit,
-    irrValid: Boolean,
     loraText: String,
     onLoraChange: (String) -> Unit,
     loraValid: Boolean,
@@ -831,43 +825,6 @@ private fun StationCard(
         )
         Spacer(Modifier.height(8.dp))
         SpecTable(rows = listOf(Spec("Botón de reactivación", "GPIO ${snapshot.wakeGpio}")))
-    }
-
-    // -- Schedule ------------------------------------------------------------
-    ConfigGroupCard(
-        title = "Programación",
-        accent = MaterialTheme.colorScheme.tertiary,
-        subtitle = "Horas en formato 0 a 23, en la hora local del teléfono.",
-    ) {
-        TerraTextField(
-            value = dailyText,
-            onValueChange = onDailyChange,
-            label = "Ciclo diario",
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            isError = dailyText.isNotEmpty() && !dailyValid,
-            supportingText = {
-                Text(
-                    dailyText.trim().toIntOrNull()?.takeIf { it in 0..23 }
-                        ?.let { "Pronóstico e inferencia diaria a las ${fmtHour(it)}" }
-                        ?: "0 a 23",
-                )
-            },
-        )
-        Spacer(Modifier.height(8.dp))
-        TerraTextField(
-            value = irrText,
-            onValueChange = onIrrChange,
-            label = "Hora de riego",
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            isError = irrText.isNotEmpty() && !irrValid,
-            supportingText = {
-                Text(
-                    irrText.trim().toIntOrNull()?.takeIf { it in 0..23 }
-                        ?.let { "Las lecturas se marcan como riego a las ${fmtHour(it)}" }
-                        ?: "0 a 23",
-                )
-            },
-        )
     }
 
     // -- Sensor capture ------------------------------------------------------
@@ -950,6 +907,9 @@ private fun ModelCard(
     inferMode: String,
     inferDev: Boolean,
     onSelect: (String) -> Unit,
+    dailyHour: Int,
+    dailyMin: Int,
+    onDailyChange: (Int, Int) -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
         Column(modifier = Modifier.padding(20.dp)) {
@@ -980,6 +940,65 @@ private fun ModelCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+    }
+
+    Spacer(Modifier.height(16.dp))
+
+    ConfigGroupCard(
+        title = "Predicción automática",
+        accent = MaterialTheme.colorScheme.secondary,
+        subtitle = "Hora local del teléfono. Por defecto las 20:00.",
+    ) {
+        val pickTime = rememberTimeOfDayPicker(onPick = onDailyChange)
+        Surface(
+            onClick = { pickTime(dailyHour, dailyMin) },
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Hora de predicción",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        formatTimeOfDay(dailyHour, dailyMin),
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                Text(
+                    "Cambiar",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Cada día a las ${formatTimeOfDay(dailyHour, dailyMin)} la estación mide y ejecuta el modelo.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            text = if (inferMode == "local") {
+                "Justo antes de predecir toma una medida, para que la última hora de la " +
+                    "ventana sea real y no una copia. Necesita 24 h de humedad y el pronóstico " +
+                    "de temperatura; si falta algo, no predice y lo anota en el registro."
+            } else {
+                "Con el modelo fuera del dispositivo esta hora no dispara ninguna predicción: " +
+                    "la estación sólo sirve los datos. Se guarda para cuando vuelvas a ejecutarlo aquí."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -1210,15 +1229,6 @@ private fun ErrorPanel(message: String, onRetry: () -> Unit) {
         Spacer(Modifier.height(20.dp))
         Button(onClick = onRetry) { Text("Reintentar") }
     }
-}
-
-// Hour-of-day (0..23) -> "HH:00".
-private fun fmtHour(h: Int): String = "${h.toString().padStart(2, '0')}:00"
-
-private fun secondsToHuman(s: Int): String = when {
-    s % 3600 == 0 && s >= 3600 -> "${s / 3600} h"
-    s % 60 == 0 && s >= 60 -> "${s / 60} min"
-    else -> "$s s"
 }
 
 // Keep only a leading '-', digits and a single '.', so a coordinate field never

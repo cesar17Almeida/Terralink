@@ -20,5 +20,16 @@ fun formatRelativeMs(ms: Long, now: Long = nowMs()): String {
     }
 }
 
+/** A duration in seconds as "10 min" / "1 h", falling back to seconds. */
+fun secondsToHuman(s: Int): String = when {
+    s % 3600 == 0 && s >= 3600 -> "${s / 3600} h"
+    s % 60 == 0 && s >= 60 -> "${s / 60} min"
+    else -> "$s s"
+}
+
+/** A local time of day as "HH:MM". */
+fun formatTimeOfDay(hour: Int, minute: Int): String =
+    hour.toString().padStart(2, '0') + ":" + minute.toString().padStart(2, '0')
+
 /** True when [ms] is missing or older than [STALE_AFTER_MS] (shown faded). */
 fun isStale(ms: Long?, now: Long = nowMs()): Boolean = ms == null || now - ms > STALE_AFTER_MS
