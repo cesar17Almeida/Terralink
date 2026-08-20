@@ -48,6 +48,11 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.withTimeoutOrNull
 
 private const val PRESENCE_SCAN_MS = 4_000L
+// Cold start: the BLE adapter (and its permission prompt) often isn't ready the
+// instant this screen appears, so the first sweep comes back empty with nothing
+// actually wrong. Sweep again before declaring every station out of range.
+private const val PRESENCE_SCAN_TRIES = 2
+private const val PRESENCE_RETRY_MS = 1_200L
 private val AvailableColor = Color(0xFF22C55E)
 private val UnavailableColor = Color(0xFF9CA3AF)
 
@@ -62,6 +67,7 @@ fun StationsListScreen(
     var seenIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var refreshing by remember { mutableStateOf(false) }
     var refreshTick by remember { mutableStateOf(0) }
+    var scanError by remember { mutableStateOf<String?>(null) }
     // Ticks every second so the per-station board clocks advance live.
     var clockNowMs by remember { mutableStateOf(nowMs()) }
     LaunchedEffect(Unit) {
@@ -74,14 +80,26 @@ fun StationsListScreen(
     // dot; the rest are "Fuera de alcance".
     LaunchedEffect(refreshTick) {
         refreshing = true
-        val collected = mutableSetOf<String>()
-        withTimeoutOrNull(PRESENCE_SCAN_MS) {
-            session.scan(saviaOnly = true)
-                .catch { /* silent: presence scan is best-effort */ }
-                .collect { device ->
-                    collected.add(device.id)
-                    seenIds = collected.toSet()
-                }
+        var failure: Throwable? = null
+        var found: Set<String> = emptySet()
+        for (attempt in 0 until PRESENCE_SCAN_TRIES) {
+            val collected = mutableSetOf<String>()
+            failure = null
+            withTimeoutOrNull(PRESENCE_SCAN_MS) {
+                session.scan(saviaOnly = true)
+                    .catch { failure = it }          // reported below, not swallowed
+                    .collect { device ->
+                        collected.add(device.id)
+                        seenIds = seenIds + device.id     // light them up as they answer
+                    }
+            }
+            found = collected
+            if (collected.isNotEmpty()) break              // something answered: done
+            if (attempt < PRESENCE_SCAN_TRIES - 1) delay(PRESENCE_RETRY_MS)
+        }
+        seenIds = found
+        scanError = failure?.let {
+            "No se pudieron buscar estaciones: ${it.message ?: "error de Bluetooth"}"
         }
         refreshing = false
     }
@@ -123,6 +141,19 @@ fun StationsListScreen(
                         .padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    // A failed sweep used to be indistinguishable from "nothing
+                    // around": name it, since it usually means Bluetooth is off or
+                    // the permission was denied.
+                    scanError?.let { msg ->
+                        item {
+                            Text(
+                                "$msg Desliza hacia abajo para reintentar.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(bottom = 4.dp),
+                            )
+                        }
+                    }
                     items(stations, key = { it.bleId }) { station ->
                         StationRow(
                             station = station,
