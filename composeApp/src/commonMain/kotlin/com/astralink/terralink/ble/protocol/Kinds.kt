@@ -13,6 +13,7 @@ object DataKind {
     const val AGG = "agg"   // Hourly aggregations.
     const val PRED = "pred" // Model predictions / outputs.
     const val LOGS = "logs" // Recent firmware log lines (array of text).
+    const val PINMAP = "pinmap" // GPIO inventory: too big (~1.1 KB) for a GATT read.
 }
 
 // Reading-kind tokens carried in a Reading/IngestPoint `kind` field. Mirrors the

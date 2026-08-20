@@ -248,6 +248,7 @@ fun App() {
                 } else {
                     PinMapScreen(
                         active = active,
+                        stationName = current.station.displayName,
                         onBack = { screen = Screen.Device(current.station) },
                     )
                 }

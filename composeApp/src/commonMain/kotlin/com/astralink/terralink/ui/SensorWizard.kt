@@ -2,7 +2,6 @@ package com.astralink.terralink.ui
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -42,23 +41,31 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.protocol.ChannelPatch
+import com.astralink.terralink.ble.protocol.MAX_SENSOR_SLOTS
 import com.astralink.terralink.ble.protocol.PinmapMsg
 import com.astralink.terralink.ble.protocol.SensorInfo
 import com.astralink.terralink.ble.protocol.SensorPatch
 import com.astralink.terralink.ui.components.BackIconButton
-import com.astralink.terralink.ui.components.PicoPinout
 import com.astralink.terralink.ui.components.PinCap
-import com.astralink.terralink.ui.components.PinCell
-import com.astralink.terralink.ui.components.PinLive
+import com.astralink.terralink.ui.components.PinSlot
+import com.astralink.terralink.ui.components.Sdi12AddressField
+import com.astralink.terralink.ui.components.SensorPinPicker
+import com.astralink.terralink.ui.components.isValidSdi12Address
 import com.astralink.terralink.ui.components.TerraIcons
 import com.astralink.terralink.ui.components.TerraTextField
 import com.astralink.terralink.ui.components.dismissKeyboardOnTap
-import com.astralink.terralink.ui.components.mergePinmap
-import com.astralink.terralink.ui.components.picoWHeader
 
 // --- catalog ----------------------------------------------------------------
 
-private data class SensorTypeInfo(val id: String, val label: String, val desc: String, val needCaps: Int)
+// `output` splits the catalog in two, the same way the firmware's sensor catalog
+// does: inputs measure and store readings on a cadence, outputs are only driven.
+private data class SensorTypeInfo(
+    val id: String,
+    val label: String,
+    val desc: String,
+    val needCaps: Int,
+    val output: Boolean = false,
+)
 
 private val SENSOR_TYPES = listOf(
     SensorTypeInfo("sdi12_aquacheck", "AquaCheck (SDI-12)",
@@ -73,8 +80,9 @@ private val SENSOR_TYPES = listOf(
         "Un pin digital; entrega temperatura y humedad del aire", PinCap.DIGITAL),
     SensorTypeInfo("hc_sr04", "HC-SR04 (distancia)",
         "Ultrasonidos; dos pines (trigger + echo); distancia en mm", PinCap.DIGITAL),
-    SensorTypeInfo("actuator", "Actuador (salida ON/OFF)",
-        "Un pin de salida digital; sin lecturas, control manual", PinCap.DIGITAL),
+    SensorTypeInfo("actuator", "Actuador (relé/válvula)",
+        "Un pin digital de salida; se acciona desde la app y no genera lecturas",
+        PinCap.DIGITAL, output = true),
 )
 
 // Types that need a second pin (HC-SR04: gpio=trigger, gpio2=echo).
@@ -84,6 +92,9 @@ private fun typeInfo(id: String): SensorTypeInfo =
     SENSOR_TYPES.firstOrNull { it.id == id } ?: SENSOR_TYPES.first()
 
 internal fun sensorTypeLabel(id: String): String = typeInfo(id).label
+
+/** True for output-only types: they are driven, never sampled. */
+internal fun isOutputType(id: String): Boolean = typeInfo(id).output
 
 private val READING_KINDS = listOf(
     "soil_moisture" to "Humedad de suelo",
@@ -140,15 +151,25 @@ private fun draftFrom(s: SensorInfo): SensorDraft = SensorDraft(
 private const val UNIT_MAX = 8
 
 // null when the draft isn't valid for its type (also gates the Guardar button).
-private fun SensorDraft.toPatchOrNull(): SensorPatch? {
+// `port` is the slot the sensor occupies -- kept across an edit, lowest free one
+// for a new sensor -- and travels with the patch so the station never has to infer
+// it from array order (see SensorPatch).
+private fun SensorDraft.toPatchOrNull(port: Int): SensorPatch? {
     val g = gpio ?: return null
-    val interval: Int? = if (followGlobal) null
+    // Outputs skip this outright: a stale interval_s on an actuator slot must not
+    // block the save through a field the wizard no longer shows.
+    val interval: Int? = if (followGlobal || isOutputType(type)) null
         else intervalText.trim().toIntOrNull()?.takeIf { it in INTERVAL_MIN_S..INTERVAL_MAX_S } ?: return null
 
     val unit = unitText.trim().take(UNIT_MAX).ifBlank { null }
+    // Blank means "not touched yet" -> the factory default. Anything the protocol
+    // can't put on the wire blocks the save instead of failing on the first read.
+    val sdi12Addr = addr.ifBlank { "0" }
+    if (type.startsWith("sdi12") && !isValidSdi12Address(sdi12Addr)) return null
+
     return when (type) {
         "sdi12_aquacheck" ->
-            SensorPatch(gpio = g, type = type, addr = addr.ifBlank { "0" }, intervalS = interval)
+            SensorPatch(port = port, gpio = g, type = type, addr = sdi12Addr, intervalS = interval)
 
         "sdi12_generic" -> {
             if (channels.isEmpty()) return null
@@ -157,7 +178,7 @@ private fun SensorDraft.toPatchOrNull(): SensorPatch? {
                 val d = c.depthText.trim().toIntOrNull() ?: return null
                 chans.add(ChannelPatch(c.kind, d))
             }
-            SensorPatch(gpio = g, type = type, addr = addr.ifBlank { "0" }, intervalS = interval,
+            SensorPatch(port = port, gpio = g, type = type, addr = sdi12Addr, intervalS = interval,
                 chan = chans, unit = unit)
         }
 
@@ -165,49 +186,28 @@ private fun SensorDraft.toPatchOrNull(): SensorPatch? {
             val sc = scaleText.trim().toDoubleOrNull() ?: return null
             val off = offsetText.trim().ifBlank { "0" }.toDoubleOrNull() ?: return null
             val depth = depthText.trim().ifBlank { "0" }.toIntOrNull() ?: return null
-            SensorPatch(gpio = g, type = type, intervalS = interval,
+            SensorPatch(port = port, gpio = g, type = type, intervalS = interval,
                 kind = kind, depthCm = depth, scale = sc, offset = off, unit = unit)
         }
 
         "onewire_ds18b20" -> {
             val depth = depthText.trim().ifBlank { "0" }.toIntOrNull() ?: return null
-            SensorPatch(gpio = g, type = type, intervalS = interval, kind = kind, depthCm = depth)
+            SensorPatch(port = port, gpio = g, type = type, intervalS = interval, kind = kind, depthCm = depth)
         }
 
         "dht11" ->                               // one digital pin; fixed outputs (air temp + humidity)
-            SensorPatch(gpio = g, type = type, intervalS = interval)
+            SensorPatch(port = port, gpio = g, type = type, intervalS = interval)
 
         "hc_sr04" -> {                           // trigger = gpio, echo = gpio2 (both required)
             val echo = gpio2 ?: return null
-            SensorPatch(gpio = g, type = type, gpio2 = echo, intervalS = interval, unit = unit)
+            SensorPatch(port = port, gpio = g, type = type, gpio2 = echo, intervalS = interval, unit = unit)
         }
 
         "actuator" ->                            // one digital output; no readings
-            SensorPatch(gpio = g, type = type)
+            SensorPatch(port = port, gpio = g, type = type)
 
         else -> null
     }
-}
-
-// --- pinout cells (device pinmap + free up the sensor being edited) ----------
-
-private fun buildCells(pinmap: PinmapMsg?, freeGpios: Set<Int>, blocked: Int? = null): List<PinCell> {
-    val header = picoWHeader()
-    if (pinmap == null) return header
-    val live = HashMap<Int, Triple<PinLive, String?, Int?>>()
-    for (p in pinmap.pins) {
-        if (p.gpio in freeGpios) continue   // editing this sensor -> its own pins are selectable again
-        val state = when (p.state) {
-            "in_use" -> PinLive.IN_USE
-            "reserved" -> PinLive.RESERVED
-            else -> PinLive.FREE
-        }
-        live[p.gpio] = Triple(state, p.reason.ifBlank { null }, p.port)
-    }
-    // A pin already chosen elsewhere in this wizard (the HC-SR04 trigger while picking
-    // echo, or vice-versa) shows as taken so the same pin can't be assigned twice.
-    if (blocked != null) live[blocked] = Triple(PinLive.IN_USE, "sensor", null)
-    return mergePinmap(header, live)
 }
 
 // --- sensor list row (shown in SensorsScreen) -------------------------------
@@ -256,11 +256,26 @@ internal fun SensorRow(
 
 /** What the wizard is editing: a brand-new sensor, or an existing one at [index]. */
 sealed class SensorTarget {
-    data object New : SensorTarget()
+    /** A new device, starting on [type] -- the Salidas section seeds "actuator". */
+    data class New(val type: String = "sdi12_aquacheck") : SensorTarget()
     data class Edit(val index: Int, val sensor: SensorInfo) : SensorTarget()
 }
 
-private const val STEP_COUNT = 4   // type -> pin -> mapping -> cadence
+// The wizard's steps. WHICH of them a device walks through is a property of its
+// type, not a constant: an output has no sampling cadence, so an actuator goes
+// type -> pin -> summary and is never asked how often to read a pin it writes.
+private enum class WizStep { TYPE, PIN, MAPPING, CADENCE }
+
+private fun stepsFor(type: String): List<WizStep> =
+    if (isOutputType(type)) listOf(WizStep.TYPE, WizStep.PIN, WizStep.MAPPING)
+    else WizStep.entries
+
+private fun stepTitle(step: WizStep, type: String): String = when (step) {
+    WizStep.TYPE -> "Tipo de dispositivo"
+    WizStep.PIN -> "Pin de conexión"
+    WizStep.MAPPING -> if (isOutputType(type)) "Resumen" else "Valores"
+    WizStep.CADENCE -> "Cadencia de muestreo"
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -273,12 +288,15 @@ fun SensorWizardScreen(
     error: String?,
     onCancel: () -> Unit,
     onSave: (List<SensorPatch>) -> Unit,
+    // One `?!` round trip on the chosen pin, so the wizard can read the SDI-12
+    // address off the probe instead of asking for it. null = no live station.
+    onProbeSdi12Address: (suspend (gpio: Int) -> String?)? = null,
 ) {
     var step by remember { mutableStateOf(0) }
     var draft by remember {
         mutableStateOf(when (target) {
             is SensorTarget.Edit -> draftFrom(target.sensor)
-            SensorTarget.New -> SensorDraft()
+            is SensorTarget.New -> SensorDraft(type = target.type)
         })
     }
 
@@ -287,7 +305,12 @@ fun SensorWizardScreen(
     val editPins: Set<Int> = remember(target) {
         (target as? SensorTarget.Edit)?.sensor?.let { setOfNotNull(it.gpio, it.gpio2) } ?: emptySet()
     }
-    val patch = draft.toPatchOrNull()
+    // The slot this sensor lives in: an edit keeps its own port, a new sensor takes
+    // the lowest free one. null = every slot is taken, so there is nothing to save.
+    val slotPort = remember(target, existing) {
+        (target as? SensorTarget.Edit)?.sensor?.port ?: firstFreePort(existing)
+    }
+    val patch = slotPort?.let { draft.toPatchOrNull(it) }
 
     // Build the full sensor table to send: existing sensors (as patches), with this
     // draft inserted (New) or replacing slot editIndex.
@@ -296,17 +319,23 @@ fun SensorWizardScreen(
         return if (editIndex == null) base + p else base
     }
 
-    val canNext = when (step) {
-        1 -> draft.gpio != null && (!needsSecondPin(draft.type) || draft.gpio2 != null)
+    // The flow's length depends on the chosen type, and the type is chosen on the
+    // first step -- so `step` is always 0 when the list changes under it. Clamped
+    // anyway: an index that outlives its list is not worth a crash.
+    val steps = stepsFor(draft.type)
+    val stepIdx = step.coerceIn(0, steps.lastIndex)
+    val canNext = when (steps[stepIdx]) {
+        WizStep.PIN -> draft.gpio != null && (!needsSecondPin(draft.type) || draft.gpio2 != null)
         else -> true
     }
+    val noun = if (isOutputType(draft.type)) "actuador" else "sensor"
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
                     Text(
-                        if (target is SensorTarget.Edit) "Editar sensor" else "Añadir sensor",
+                        if (target is SensorTarget.Edit) "Editar $noun" else "Añadir $noun",
                         fontWeight = FontWeight.SemiBold,
                     )
                 },
@@ -316,12 +345,13 @@ fun SensorWizardScreen(
         },
         bottomBar = {
             WizardBar(
-                step = step,
+                lastStep = stepIdx == steps.lastIndex,
+                firstStep = stepIdx == 0,
                 busy = busy,
                 canNext = canNext,
                 canSave = patch != null,
-                onBack = { if (step == 0) onCancel() else step-- },
-                onNext = { if (step < STEP_COUNT - 1) step++ },
+                onBack = { if (stepIdx == 0) onCancel() else step = stepIdx - 1 },
+                onNext = { if (stepIdx < steps.lastIndex) step = stepIdx + 1 },
                 onSave = { patch?.let { onSave(buildTable(it)) } },
             )
         },
@@ -335,19 +365,21 @@ fun SensorWizardScreen(
                 .padding(horizontal = 16.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            StepHeader(step)
-            when (step) {
-                0 -> TypeStep(draft) { draft = draft.copy(type = it, gpio = null, gpio2 = null) }
-                1 -> PinStep(
+            StepHeader(stepIdx, steps, draft.type)
+            when (steps[stepIdx]) {
+                WizStep.TYPE -> TypeStep(draft) { draft = draft.copy(type = it, gpio = null, gpio2 = null) }
+                WizStep.PIN -> PinStep(
                     draft = draft,
                     pinmap = pinmap,
                     pinmapWarning = pinmapWarning,
                     editPins = editPins,
+                    port = slotPort,
+                    editing = target is SensorTarget.Edit,
                     onSelectTrigger = { draft = draft.copy(gpio = it) },
                     onSelectEcho = { draft = draft.copy(gpio2 = it) },
                 )
-                2 -> MappingStep(draft) { draft = it }
-                3 -> CadenceStep(draft) { draft = it }
+                WizStep.MAPPING -> MappingStep(draft, slotPort, onProbeSdi12Address) { draft = it }
+                WizStep.CADENCE -> CadenceStep(draft) { draft = it }
             }
             error?.let {
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
@@ -357,39 +389,54 @@ fun SensorWizardScreen(
 }
 
 @Composable
-private fun StepHeader(step: Int) {
-    val title = when (step) {
-        0 -> "1 · Tipo de sensor"
-        1 -> "2 · Pin de conexión"
-        2 -> "3 · Valores"
-        else -> "4 · Cadencia de muestreo"
-    }
+private fun StepHeader(index: Int, steps: List<WizStep>, type: String) {
     Column {
-        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Text("Paso ${step + 1} de $STEP_COUNT", style = MaterialTheme.typography.bodySmall,
+        Text(
+            "${index + 1} · ${stepTitle(steps[index], type)}",
+            style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+        )
+        Text("Paso ${index + 1} de ${steps.size}", style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
+// Inputs and outputs are shown as two labelled groups: the distinction decides how
+// the rest of the wizard behaves, so the installer meets it before choosing.
 @Composable
 private fun TypeStep(draft: SensorDraft, onPick: (String) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        SENSOR_TYPES.forEach { t ->
-            val selected = draft.type == t.id
-            Card(
-                modifier = Modifier.fillMaxWidth().clickable { onPick(t.id) },
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer
-                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                ),
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(t.label, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-                    Spacer(Modifier.height(2.dp))
-                    Text(t.desc, style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+        TypeGroup("Entradas · miden y guardan lecturas",
+            SENSOR_TYPES.filterNot { it.output }, draft.type, onPick)
+        Spacer(Modifier.height(2.dp))
+        TypeGroup("Salidas · se accionan desde la app",
+            SENSOR_TYPES.filter { it.output }, draft.type, onPick)
+    }
+}
+
+@Composable
+private fun TypeGroup(
+    title: String,
+    types: List<SensorTypeInfo>,
+    selectedId: String,
+    onPick: (String) -> Unit,
+) {
+    Text(title, style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.onSurfaceVariant)
+    types.forEach { t ->
+        val selected = selectedId == t.id
+        Card(
+            modifier = Modifier.fillMaxWidth().clickable { onPick(t.id) },
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer
+                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+            ),
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(t.label, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.height(2.dp))
+                Text(t.desc, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -401,78 +448,59 @@ private fun PinStep(
     pinmap: PinmapMsg?,
     pinmapWarning: String?,
     editPins: Set<Int>,
+    port: Int?,
+    editing: Boolean,
     onSelectTrigger: (Int) -> Unit,
     onSelectEcho: (Int) -> Unit,
 ) {
     val info = typeInfo(draft.type)
     val capName = if (info.needCaps == PinCap.ADC) "analógico (ADC, GP26–28)" else "digital"
     val two = needsSecondPin(draft.type)
-    // Each picker blocks the pin the OTHER already holds so a pin can't be assigned twice.
-    val triggerCells = remember(pinmap, editPins, draft.gpio2) { buildCells(pinmap, editPins, blocked = draft.gpio2) }
-    val echoCells = remember(pinmap, editPins, draft.gpio) { buildCells(pinmap, editPins, blocked = draft.gpio) }
 
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         // Without the inventory every pin is drawn free, so say so up front instead
         // of letting the user pick one the station will refuse.
         pinmapWarning?.let { WarningCard(it) }
         Text(
-            if (two) "El HC-SR04 usa dos pines: trigger (salida) y echo (entrada). Toca un pin para cada uno."
+            if (two) "El HC-SR04 usa dos pines: trigger (salida) y echo (entrada). Elige la ranura y toca su pin."
+            else if (info.output) "Toca un pin resaltado. ${info.label} lo usa como salida digital."
             else "Toca un pin resaltado. ${info.label} necesita un pin $capName.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        PinPicker(
-            title = if (two) "Trigger (salida)" else null,
-            selected = draft.gpio,
-            cells = triggerCells,
-            needCaps = info.needCaps,
-            onSelect = onSelectTrigger,
-        )
-        if (two) {
-            PinPicker(
-                title = "Echo (entrada)",
-                selected = draft.gpio2,
-                cells = echoCells,
-                needCaps = info.needCaps,
-                onSelect = onSelectEcho,
+        // Moving a sensor to another pin is safe and needs no warning: the port --
+        // which is what every stored reading is keyed by -- does not change.
+        if (editing) {
+            Text(
+                "Cambiar de pin no afecta al histórico: el sensor sigue en el puerto $port.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-    }
-}
-
-@Composable
-private fun PinPicker(
-    title: String?,
-    selected: Int?,
-    cells: List<PinCell>,
-    needCaps: Int,
-    onSelect: (Int) -> Unit,
-) {
-    if (title != null) {
-        Text(title, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Medium)
-    }
-    Text(
-        selected?.let { "Seleccionado: GPIO $it" } ?: "Ningún pin seleccionado",
-        style = MaterialTheme.typography.bodyMedium,
-        fontWeight = FontWeight.Medium,
-        color = if (selected != null) MaterialTheme.colorScheme.primary
-        else MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-        PicoPinout(
-            cells = cells,
-            needCaps = needCaps,
-            onSelect = onSelect,
-            modifier = Modifier.fillMaxWidth(0.66f),
+        SensorPinPicker(
+            pinmap = pinmap,
+            freePins = editPins,
+            needCaps = info.needCaps,
+            twoPins = two,
+            gpio = draft.gpio,
+            gpio2 = draft.gpio2,
+            onSelect = { slot, g ->
+                if (slot == PinSlot.TRIGGER) onSelectTrigger(g) else onSelectEcho(g)
+            },
         )
     }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun MappingStep(draft: SensorDraft, onChange: (SensorDraft) -> Unit) {
+private fun MappingStep(
+    draft: SensorDraft,
+    port: Int?,
+    onProbe: (suspend (gpio: Int) -> String?)?,
+    onChange: (SensorDraft) -> Unit,
+) {
     when (draft.type) {
-        "sdi12_aquacheck" -> AddrField(draft, onChange) {
+        "sdi12_aquacheck" -> AddrField(draft, onProbe, onChange) {
             Text(
                 "La AquaCheck tiene un formato fijo (humedad por profundidad); sólo necesita su dirección SDI-12.",
                 style = MaterialTheme.typography.bodySmall,
@@ -481,7 +509,7 @@ private fun MappingStep(draft: SensorDraft, onChange: (SensorDraft) -> Unit) {
         }
 
         "sdi12_generic" -> Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            AddrField(draft, onChange, supporting = null)
+            AddrField(draft, onProbe, onChange, supporting = null)
             ChannelsEditor(draft, onChange)
         }
 
@@ -540,10 +568,48 @@ private fun MappingStep(draft: SensorDraft, onChange: (SensorDraft) -> Unit) {
             UnitField(draft, onChange)
         }
 
-        "actuator" -> InfoStep(
-            "Salida digital ON/OFF; no produce lecturas. Una vez guardado, contrólalo con el " +
-                "interruptor que aparece en la lista de sensores.",
-        )
+        // An output has nothing to map: this last step confirms what is about to be
+        // written instead of asking for a decoding the type does not have.
+        "actuator" -> Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            InfoStep(
+                "Una salida no se muestrea: no tiene cadencia ni histórico. La estación " +
+                    "sólo la conmuta cuando se lo pides desde la app.",
+            )
+            SummaryCard(
+                listOf(
+                    "Puerto" to (port?.toString() ?: "—"),
+                    "Pin" to (draft.gpio?.let { "GP$it" } ?: "sin elegir"),
+                    "Al arrancar" to "apagada",
+                ),
+            )
+            Text(
+                "Al guardar aparecerá en la sección Salidas con su interruptor.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** Label/value rows in a muted card: what the wizard is about to write. */
+@Composable
+private fun SummaryCard(rows: List<Pair<String, String>>) {
+    Card(
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            rows.forEach { (label, value) ->
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    Text(label, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f))
+                    Text(value, style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium)
+                }
+            }
+        }
     }
 }
 
@@ -587,14 +653,16 @@ private fun WarningCard(text: String) {
 @Composable
 private fun AddrField(
     draft: SensorDraft,
+    onProbe: (suspend (gpio: Int) -> String?)?,
     onChange: (SensorDraft) -> Unit,
     supporting: (@Composable () -> Unit)?,
 ) {
-    TerraTextField(
+    Sdi12AddressField(
         value = draft.addr,
-        onValueChange = { onChange(draft.copy(addr = it.take(1))) },
-        label = "Dirección SDI-12",
-        supportingText = supporting ?: { Text("Normalmente '0'") },
+        onValueChange = { onChange(draft.copy(addr = it)) },
+        gpio = draft.gpio,
+        onProbe = onProbe,
+        supporting = supporting,
     )
 }
 
@@ -731,7 +799,8 @@ private fun CadenceStep(draft: SensorDraft, onChange: (SensorDraft) -> Unit) {
 
 @Composable
 private fun WizardBar(
-    step: Int,
+    lastStep: Boolean,
+    firstStep: Boolean,
     busy: Boolean,
     canNext: Boolean,
     canSave: Boolean,
@@ -739,14 +808,14 @@ private fun WizardBar(
     onNext: () -> Unit,
     onSave: () -> Unit,
 ) {
-    val last = step == STEP_COUNT - 1
+    val last = lastStep
     Row(
         modifier = Modifier.fillMaxWidth().padding(16.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         OutlinedButton(onClick = onBack, enabled = !busy, modifier = Modifier.weight(1f)) {
-            Text(if (step == 0) "Cancelar" else "Atrás")
+            Text(if (firstStep) "Cancelar" else "Atrás")
         }
         if (last) {
             Button(onClick = onSave, enabled = canSave && !busy, modifier = Modifier.weight(1f)) {
@@ -766,12 +835,23 @@ internal fun intervalHuman(s: Int): String = when {
     else -> "$s s"
 }
 
-/** Full-table patch with the sensor at [index] removed (delete = re-send the rest). */
+/**
+ * Full-table patch with the sensor at [index] removed (delete = re-send the rest).
+ * The survivors keep the ports they already had -- the deleted one just leaves a
+ * hole. Compacting here would renumber them, and every stored reading is keyed by
+ * port, so the next sensor to reuse that number would inherit a stranger's history.
+ */
 internal fun sensorTableWithout(sensors: List<SensorInfo>, index: Int): List<SensorPatch> =
     sensors.filterIndexed { i, _ -> i != index }.map { it.toPatch() }
 
-// SensorInfo -> SensorPatch (re-send an unchanged sensor verbatim in a full-table patch).
+/** Lowest free slot for a new sensor, or null when all [MAX_SENSOR_SLOTS] are taken. */
+internal fun firstFreePort(sensors: List<SensorInfo>): Int? =
+    (1..MAX_SENSOR_SLOTS).firstOrNull { p -> sensors.none { it.port == p } }
+
+// SensorInfo -> SensorPatch (re-send an unchanged sensor verbatim in a full-table
+// patch). Carries its own port, so re-sending the table never moves a sensor.
 private fun SensorInfo.toPatch(): SensorPatch = SensorPatch(
+    port = port,
     gpio = gpio,
     type = type,
     addr = addr.takeIf { type.startsWith("sdi12") && it.isNotBlank() },

@@ -96,6 +96,11 @@ object ReadingsRepository {
         requireDb().readingsQueries.deleteByStation(stationId)
     }
 
+    /** Drop one sensor's cached history (by physical port). See deleteByStationPort. */
+    fun deleteByStationPort(stationId: String, port: Int) {
+        requireDb().readingsQueries.deleteByStationPort(stationId, port.toLong())
+    }
+
     private fun requireDb(): TerralinkDb =
         db ?: error(
             "ReadingsRepository not initialized. Call init(createTerralinkDb()) at app launch."

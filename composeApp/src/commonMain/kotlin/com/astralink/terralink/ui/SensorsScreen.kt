@@ -1,5 +1,6 @@
 package com.astralink.terralink.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,9 +11,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -35,6 +38,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.protocol.ConfigPatchMsg
@@ -44,10 +48,13 @@ import com.astralink.terralink.ble.protocol.SensorPatch
 import com.astralink.terralink.ble.protocol.SensorType
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.model.SavedStation
+import com.astralink.terralink.state.ReadingsRepository
 import com.astralink.terralink.ui.components.BackIconButton
 import com.astralink.terralink.ui.components.EmptyState
 import com.astralink.terralink.ui.components.ListItemsCard
+import com.astralink.terralink.ui.components.SectionHeader
 import com.astralink.terralink.ui.components.TerraDialog
+import com.astralink.terralink.ui.components.parseSdi12Address
 import com.astralink.terralink.ui.components.TerraIcons
 import kotlinx.coroutines.launch
 
@@ -127,7 +134,7 @@ private fun SensorsScaffold(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Sensores", fontWeight = FontWeight.SemiBold) },
+                title = { Text("Sensores y salidas", fontWeight = FontWeight.SemiBold) },
                 navigationIcon = { BackIconButton(onClick = onBack) },
                 actions = {
                     IconButton(onClick = onOpenConsole, enabled = consoleEnabled) {
@@ -160,11 +167,12 @@ private fun SensorsReady(
 
     // Open the "add sensor" wizard immediately when arriving here to add one (e.g. from
     // the SDI-12 console's empty state).
-    var wizard by remember { mutableStateOf<SensorTarget?>(if (openWizardOnStart) SensorTarget.New else null) }
+    var wizard by remember { mutableStateOf<SensorTarget?>(if (openWizardOnStart) SensorTarget.New() else null) }
     var historyTarget by remember { mutableStateOf<SensorInfo?>(null) }
     var savingSensors by remember { mutableStateOf(false) }
     var sensorError by remember { mutableStateOf<String?>(null) }
     var confirmDeleteSensor by remember { mutableStateOf<Int?>(null) }
+    var dropHistory by remember { mutableStateOf(false) }
 
     // Live actuator states (StatusMsg.act), refreshed after each toggle.
     var actStates by remember { mutableStateOf<List<com.astralink.terralink.ble.protocol.ActuatorState>>(emptyList()) }
@@ -218,6 +226,37 @@ private fun SensorsReady(
         }
     }
 
+    // Wipe one sensor's readings in both copies. The station's ring only holds ~48 h,
+    // but that tail would still reach a future sensor on the same port, so it goes too.
+    // A station-side failure is reported, not swallowed: the local delete already
+    // happened and the user must know the two copies disagree.
+    fun deleteSensorHistory(port: Int) {
+        runCatching { ReadingsRepository.deleteByStationPort(station.bleId, port) }
+            .onFailure { e ->
+                val msg = e.message ?: "No se pudo borrar el histórico local"
+                sensorError = msg
+                scope.launch { snackbarHostState.showSnackbar(msg) }
+            }
+        scope.launch {
+            try {
+                active.clearPort(port)
+            } catch (e: Throwable) {
+                val msg = "El histórico se borró en el móvil, pero la estación no pudo " +
+                    "borrar su copia (${e.message ?: "sin detalle"})."
+                sensorError = msg
+                snackbarHostState.showSnackbar(msg)
+            }
+        }
+    }
+
+    // Ask the probe on `gpio` for its own SDI-12 address (`?!`) so the wizard does not
+    // have to ask the installer. remember'd: an inline lambda would be a new instance
+    // on every recomposition and restart the probe. Failures answer null -- the field
+    // retries and then falls back to the factory default.
+    val probeSdi12Address: suspend (Int) -> String? = remember(active) {
+        { gpio -> parseSdi12Address(active.sdi12Command(gpio, "?!").lines) }
+    }
+
     // The wizard takes over the whole screen while open (its own Scaffold).
     val wizardTarget = wizard
     if (wizardTarget != null) {
@@ -230,6 +269,7 @@ private fun SensorsReady(
             error = sensorError,
             onCancel = { wizard = null; sensorError = null },
             onSave = { table -> sendSensorTable(table) { wizard = null; sensorError = null; onReload() } },
+            onProbeSdi12Address = probeSdi12Address,
         )
         return
     }
@@ -249,7 +289,7 @@ private fun SensorsReady(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Sensores", fontWeight = FontWeight.SemiBold) },
+                title = { Text("Sensores y salidas", fontWeight = FontWeight.SemiBold) },
                 navigationIcon = { BackIconButton(onClick = onBack) },
                 actions = {
                     IconButton(onClick = onOpenConsole) {
@@ -259,7 +299,7 @@ private fun SensorsReady(
             )
         },
         floatingActionButton = {
-            FloatingActionButton(onClick = { sensorError = null; wizard = SensorTarget.New }) {
+            FloatingActionButton(onClick = { sensorError = null; wizard = SensorTarget.New() }) {
                 Icon(TerraIcons.Add, contentDescription = "Añadir sensor")
             }
         },
@@ -283,12 +323,37 @@ private fun SensorsReady(
             if (sensors.isEmpty()) {
                 EmptyState(
                     icon = TerraIcons.Sensors,
-                    title = "No hay sensores configurados",
-                    hint = "Usa el botón + para añadir el primero.",
+                    title = "Nada configurado todavía",
+                    hint = "Usa el botón + para añadir el primer sensor o actuador.",
                 )
             } else {
-                ListItemsCard(items = sensors) { i, s ->
-                    if (s.type == SensorType.ACTUATOR) {
+                // Inputs and outputs are different things and are listed as such. Both
+                // draw from the same pool of slots, so the row keeps its index into
+                // `sensors` -- that index is what edit/delete address.
+                val (outputs, inputs) = sensors.withIndex().partition { it.value.type == SensorType.ACTUATOR }
+                ListSection("Entradas", "Miden y guardan lecturas")
+                if (inputs.isEmpty()) {
+                    ListSectionEmpty("Ningún sensor configurado.")
+                } else {
+                    ListItemsCard(items = inputs) { _, (i, s) ->
+                        SensorRow(index = i, sensor = s, busy = savingSensors,
+                            onOpen = { historyTarget = s },
+                            onEdit = { sensorError = null; wizard = SensorTarget.Edit(i, sensors[i]) },
+                            onDelete = { confirmDeleteSensor = i })
+                    }
+                }
+                Spacer(Modifier.height(20.dp))
+                ListSection(
+                    "Salidas", "Se accionan desde aquí; no generan lecturas",
+                    accent = MaterialTheme.colorScheme.tertiary,
+                    action = "Añadir",
+                    onAction = { sensorError = null; wizard = SensorTarget.New(SensorType.ACTUATOR) },
+                    actionEnabled = !savingSensors,
+                )
+                if (outputs.isEmpty()) {
+                    ListSectionEmpty("Ninguna salida configurada.")
+                } else {
+                    ListItemsCard(items = outputs) { _, (i, s) ->
                         ActuatorRow(
                             sensor = s,
                             on = actStates.firstOrNull { it.port == s.port }?.on ?: false,
@@ -297,11 +362,6 @@ private fun SensorsReady(
                             onEdit = { sensorError = null; wizard = SensorTarget.Edit(i, sensors[i]) },
                             onDelete = { confirmDeleteSensor = i },
                         )
-                    } else {
-                        SensorRow(index = i, sensor = s, busy = savingSensors,
-                            onOpen = { historyTarget = s },
-                            onEdit = { sensorError = null; wizard = SensorTarget.Edit(i, sensors[i]) },
-                            onDelete = { confirmDeleteSensor = i })
                     }
                 }
             }
@@ -315,26 +375,114 @@ private fun SensorsReady(
 
     confirmDeleteSensor?.let { idx ->
         val s = sensors.getOrNull(idx)
+        val port = s?.port
+        val isOutput = s?.type == SensorType.ACTUATOR
+        // What the installer stands to lose, counted before they decide. An output
+        // has no readings of its own, so it never asks about a history.
+        val cached = remember(port) {
+            port?.let { runCatching { ReadingsRepository.countByStationPort(station.bleId, it) }
+                .getOrDefault(0L) } ?: 0L
+        }
         TerraDialog(
-            onDismiss = { confirmDeleteSensor = null },
-            title = "¿Eliminar sensor?",
+            onDismiss = { confirmDeleteSensor = null; dropHistory = false },
+            title = if (isOutput) "¿Eliminar actuador?" else "¿Eliminar sensor?",
             confirmText = "Eliminar",
             destructive = true,
             confirmEnabled = !savingSensors,
             onConfirm = {
                 confirmDeleteSensor = null
+                val drop = dropHistory
+                dropHistory = false
                 sendSensorTable(sensorTableWithout(sensors, idx)) {
-                    sensorError = null; onReload()
+                    sensorError = null
+                    if (drop && port != null) deleteSensorHistory(port)
+                    onReload()
                 }
             },
         ) {
             Text(
-                "Se quitará el sensor del puerto ${s?.port ?: (idx + 1)}" +
+                "Se quitará ${if (isOutput) "la salida" else "el sensor"} del puerto " +
+                    "${port ?: (idx + 1)}" +
                     (s?.let { " (${sensorTypeLabel(it.type)})" } ?: "") +
-                    ". Puedes volver a añadirlo cuando quieras.",
+                    ". El puerto queda libre y conserva su número: los demás no se mueven.",
             )
+            if (isOutput) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "La estación apaga su pin al quitarla: una válvula no puede quedarse " +
+                        "abierta sin nadie que la controle.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (!isOutput && cached > 0) {
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    "Tiene $cached ${if (cached == 1L) "lectura guardada" else "lecturas guardadas"}.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                )
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth().clickable { dropHistory = !dropHistory },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(checked = dropHistory, onCheckedChange = { dropHistory = it })
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        "Borrar también su histórico",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+                Text(
+                    if (dropHistory) "Se borrarán en el móvil y en la estación. No se puede deshacer."
+                    else "Se conservan. Si más adelante asignas otro sensor a este puerto, " +
+                        "verás las dos etapas juntas en su histórico.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
+}
+
+/** Heading for one half of the list: the shared accent header, a one-line caption
+ *  explaining what the half is for, and an optional action on the right. */
+@Composable
+private fun ListSection(
+    title: String,
+    caption: String,
+    accent: Color = MaterialTheme.colorScheme.primary,
+    action: String? = null,
+    onAction: (() -> Unit)? = null,
+    actionEnabled: Boolean = true,
+) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(modifier = Modifier.weight(1f)) {
+            SectionHeader(title, accent = accent)
+            Spacer(Modifier.height(2.dp))
+            Text(
+                caption,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 14.dp),   // aligns under the title
+            )
+        }
+        if (action != null && onAction != null) {
+            TextButton(onClick = onAction, enabled = actionEnabled) { Text(action) }
+        }
+    }
+    Spacer(Modifier.height(8.dp))
+}
+
+@Composable
+private fun ListSectionEmpty(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 14.dp, bottom = 4.dp),
+    )
 }
 
 /** Sensor-list row for a digital actuator: name/pin on the left, a live ON/OFF Switch,

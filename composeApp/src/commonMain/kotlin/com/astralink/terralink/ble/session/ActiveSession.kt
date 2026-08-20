@@ -334,9 +334,20 @@ class ActiveSession internal constructor(
     suspend fun readConfig(): ConfigSnapshotMsg =
         decode(connection.read(CHR_CONFIG_UUID))
 
-    /** Read the GPIO inventory (…0015): which pins are free / in use / reserved + caps. */
-    suspend fun readPinmap(): PinmapMsg =
-        decode(connection.read(CHR_PINMAP_UUID))
+    /**
+     * Read the GPIO inventory: which pins are free / in use / reserved + caps.
+     *
+     * It travels CHUNKED, not as a plain read of …0015: the inventory is ~1.1 KB and
+     * a GATT characteristic value tops out at the 512 B ATT maximum, so both Android
+     * and iOS hand back a truncated CBOR that fails to decode. The …0015 read is kept
+     * as a fallback for firmware that predates the "pinmap" kind.
+     */
+    suspend fun readPinmap(): PinmapMsg = try {
+        decode(requestData(DataKind.PINMAP))
+    } catch (chunked: Throwable) {
+        runCatching { decode<PinmapMsg>(connection.read(CHR_PINMAP_UUID)) }
+            .getOrElse { throw chunked }
+    }
 
     /**
      * Apply a config patch (only the changed fields) and CONFIRM it: the station
@@ -439,6 +450,17 @@ class ActiveSession internal constructor(
     /** Dev: wipe all stored data on the station. */
     suspend fun clearData() {
         runDataRequest { connection.write(CHR_DATA_REQUEST_UUID, encode(ClearRequestMsg())) }
+    }
+
+    /**
+     * Drop one sensor's readings from the station's ring. The station only holds
+     * ~48 h, but that is long enough for a freed port to hand a new sensor the old
+     * one's tail on the next sync -- readings are keyed by port on both sides.
+     */
+    suspend fun clearPort(port: Int) {
+        runDataRequest {
+            connection.write(CHR_DATA_REQUEST_UUID, encode(ClearRequestMsg(port = port)))
+        }
     }
 
     // --- Data query --------------------------------------------------------

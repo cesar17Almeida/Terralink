@@ -332,7 +332,7 @@ private fun TileGrid(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             PremiumTile(
-                title = "Sensores", caption = "Gestionar y consultar", icon = TerraIcons.Sensors,
+                title = "Sensores", caption = "Entradas y salidas", icon = TerraIcons.Sensors,
                 onClick = onOpenSensors, modifier = Modifier.weight(1f),
             )
             PremiumTile(

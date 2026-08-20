@@ -47,3 +47,9 @@ LIMIT ?;
 
 deleteByStation:
 DELETE FROM Reading WHERE station_id = ?;
+
+-- Drop one sensor's cached history. Used when a sensor is deleted and the user
+-- chooses not to keep its data: the port is about to be free for a different
+-- sensor, and readings are keyed by port.
+deleteByStationPort:
+DELETE FROM Reading WHERE station_id = ? AND port = ?;
