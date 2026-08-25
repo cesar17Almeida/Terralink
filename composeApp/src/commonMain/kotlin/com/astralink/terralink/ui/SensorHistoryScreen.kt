@@ -43,6 +43,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.protocol.Reading
 import com.astralink.terralink.ble.protocol.SensorInfo
+import com.astralink.terralink.ble.protocol.STATION_RAW_PAGE
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.ReadingsRepository
@@ -56,7 +57,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 
 // Incremental pull tuning, mirroring SyncScreen's paged raw download.
-private const val HIST_PAGE_SIZE = 500
+// Must not exceed what the firmware serves per request: it truncates at 150 with
+// no flag, so a larger page size makes "a short page means we are done" fire on
+// the FIRST page and the history silently stops at 150 rows.
+private const val HIST_PAGE_SIZE = STATION_RAW_PAGE
 private const val HIST_MAX_PAGES = 200
 private const val HIST_PAGE_TIMEOUT_MS = 30_000L
 

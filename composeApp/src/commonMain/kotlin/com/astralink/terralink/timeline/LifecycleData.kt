@@ -47,6 +47,18 @@ fun SeriesKey.chip(): SeriesChip = SeriesChip(
     unit = unitOf(kind),
 )
 
+/** The variable in the words the model and the agronomy literature use for it, so
+ *  the accuracy screen never leaves "predicted what?" to be inferred from a chip. */
+fun SeriesKey.longLabel(): String = when {
+    isForecastable -> "HS30 · humedad del suelo a 30 cm"
+    kind == ReadingKind.SOIL_MOISTURE && depthCm != null -> "Humedad del suelo a $depthCm cm"
+    kind == ReadingKind.SOIL_MOISTURE -> "Humedad del suelo"
+    kind == ReadingKind.SOIL_TEMPERATURE -> "Temperatura del suelo"
+    kind == ReadingKind.AIR_TEMPERATURE -> "Temperatura del aire"
+    kind == ReadingKind.AIR_HUMIDITY -> "Humedad del aire"
+    else -> "Puerto $port · $kind"
+}
+
 fun unitOf(kind: String): String = when (kind) {
     ReadingKind.SOIL_MOISTURE -> "VWC 0–1"
     ReadingKind.SOIL_TEMPERATURE, ReadingKind.AIR_TEMPERATURE -> "°C"

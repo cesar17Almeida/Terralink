@@ -134,7 +134,7 @@ private fun SensorsScaffold(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Sensores y salidas", fontWeight = FontWeight.SemiBold) },
+                title = { Text("Sensores y actuadores", fontWeight = FontWeight.SemiBold) },
                 navigationIcon = { BackIconButton(onClick = onBack) },
                 actions = {
                     IconButton(onClick = onOpenConsole, enabled = consoleEnabled) {
@@ -165,9 +165,12 @@ private fun SensorsReady(
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Open the "add sensor" wizard immediately when arriving here to add one (e.g. from
-    // the SDI-12 console's empty state).
-    var wizard by remember { mutableStateOf<SensorTarget?>(if (openWizardOnStart) SensorTarget.New() else null) }
+    // The add wizard: null = closed. `true` = opened from the FAB, so it starts by
+    // asking sensor-or-actuator; `false` = arrived here to add one (from the SDI-12
+    // console's empty state), which already said "sensor" and skips that question.
+    var addWizard by remember { mutableStateOf<Boolean?>(if (openWizardOnStart) false else null) }
+    // Slot index being edited, on its own screen -- one field at a time, no wizard.
+    var editSlot by remember { mutableStateOf<Int?>(null) }
     var historyTarget by remember { mutableStateOf<SensorInfo?>(null) }
     var savingSensors by remember { mutableStateOf(false) }
     var sensorError by remember { mutableStateOf<String?>(null) }
@@ -258,17 +261,42 @@ private fun SensorsReady(
     }
 
     // The wizard takes over the whole screen while open (its own Scaffold).
-    val wizardTarget = wizard
-    if (wizardTarget != null) {
+    val pickKind = addWizard
+    if (pickKind != null) {
         SensorWizardScreen(
-            target = wizardTarget,
+            pickKind = pickKind,
             existing = sensors,
             pinmap = pinmap,
             pinmapWarning = pinmapWarning,
             busy = savingSensors,
             error = sensorError,
-            onCancel = { wizard = null; sensorError = null },
-            onSave = { table -> sendSensorTable(table) { wizard = null; sensorError = null; onReload() } },
+            onCancel = { addWizard = null; sensorError = null },
+            onSave = { table -> sendSensorTable(table) { addWizard = null; sensorError = null; onReload() } },
+            onProbeSdi12Address = probeSdi12Address,
+        )
+        return
+    }
+
+    // Editing is a single screen, not a walk-through: the installer usually comes to
+    // change one thing. A slot that vanished under a reload just closes the screen.
+    val edited = editSlot?.let { i -> sensors.getOrNull(i)?.let { i to it } }
+    if (edited != null) {
+        val (slot, sensor) = edited
+        val readings = remember(station.bleId, sensor.port) {
+            runCatching { ReadingsRepository.countByStationPort(station.bleId, sensor.port) }
+                .getOrDefault(0L)
+        }
+        SensorEditScreen(
+            index = slot,
+            sensor = sensor,
+            existing = sensors,
+            pinmap = pinmap,
+            pinmapWarning = pinmapWarning,
+            readings = readings,
+            busy = savingSensors,
+            error = sensorError,
+            onCancel = { editSlot = null; sensorError = null },
+            onSave = { table -> sendSensorTable(table) { editSlot = null; sensorError = null; onReload() } },
             onProbeSdi12Address = probeSdi12Address,
         )
         return
@@ -289,7 +317,7 @@ private fun SensorsReady(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Sensores y salidas", fontWeight = FontWeight.SemiBold) },
+                title = { Text("Sensores y actuadores", fontWeight = FontWeight.SemiBold) },
                 navigationIcon = { BackIconButton(onClick = onBack) },
                 actions = {
                     IconButton(onClick = onOpenConsole) {
@@ -299,8 +327,8 @@ private fun SensorsReady(
             )
         },
         floatingActionButton = {
-            FloatingActionButton(onClick = { sensorError = null; wizard = SensorTarget.New() }) {
-                Icon(TerraIcons.Add, contentDescription = "Añadir sensor")
+            FloatingActionButton(onClick = { sensorError = null; addWizard = true }) {
+                Icon(TerraIcons.Add, contentDescription = "Añadir sensor o actuador")
             }
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -331,27 +359,24 @@ private fun SensorsReady(
                 // draw from the same pool of slots, so the row keeps its index into
                 // `sensors` -- that index is what edit/delete address.
                 val (outputs, inputs) = sensors.withIndex().partition { it.value.type == SensorType.ACTUATOR }
-                ListSection("Entradas", "Miden y guardan lecturas")
+                ListSection("Sensores", "Miden y guardan lecturas")
                 if (inputs.isEmpty()) {
                     ListSectionEmpty("Ningún sensor configurado.")
                 } else {
                     ListItemsCard(items = inputs) { _, (i, s) ->
                         SensorRow(index = i, sensor = s, busy = savingSensors,
                             onOpen = { historyTarget = s },
-                            onEdit = { sensorError = null; wizard = SensorTarget.Edit(i, sensors[i]) },
+                            onEdit = { sensorError = null; editSlot = i },
                             onDelete = { confirmDeleteSensor = i })
                     }
                 }
                 Spacer(Modifier.height(20.dp))
                 ListSection(
-                    "Salidas", "Se accionan desde aquí; no generan lecturas",
+                    "Actuadores", "Se accionan desde aquí; no generan lecturas",
                     accent = MaterialTheme.colorScheme.tertiary,
-                    action = "Añadir",
-                    onAction = { sensorError = null; wizard = SensorTarget.New(SensorType.ACTUATOR) },
-                    actionEnabled = !savingSensors,
                 )
                 if (outputs.isEmpty()) {
-                    ListSectionEmpty("Ninguna salida configurada.")
+                    ListSectionEmpty("Ningún actuador configurado.")
                 } else {
                     ListItemsCard(items = outputs) { _, (i, s) ->
                         ActuatorRow(
@@ -359,7 +384,7 @@ private fun SensorsReady(
                             on = actStates.firstOrNull { it.port == s.port }?.on ?: false,
                             busy = savingSensors || togglingActuator,
                             onToggle = { on -> toggleActuator(s.port, on) },
-                            onEdit = { sensorError = null; wizard = SensorTarget.Edit(i, sensors[i]) },
+                            onEdit = { sensorError = null; editSlot = i },
                             onDelete = { confirmDeleteSensor = i },
                         )
                     }
@@ -401,7 +426,7 @@ private fun SensorsReady(
             },
         ) {
             Text(
-                "Se quitará ${if (isOutput) "la salida" else "el sensor"} del puerto " +
+                "Se quitará ${if (isOutput) "el actuador" else "el sensor"} del puerto " +
                     "${port ?: (idx + 1)}" +
                     (s?.let { " (${sensorTypeLabel(it.type)})" } ?: "") +
                     ". El puerto queda libre y conserva su número: los demás no se mueven.",
@@ -409,7 +434,7 @@ private fun SensorsReady(
             if (isOutput) {
                 Spacer(Modifier.height(10.dp))
                 Text(
-                    "La estación apaga su pin al quitarla: una válvula no puede quedarse " +
+                    "La estación apaga su pin al quitarlo: una válvula no puede quedarse " +
                         "abierta sin nadie que la controle.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -446,31 +471,23 @@ private fun SensorsReady(
     }
 }
 
-/** Heading for one half of the list: the shared accent header, a one-line caption
- *  explaining what the half is for, and an optional action on the right. */
+/** Heading for one half of the list: the shared accent header and a one-line caption
+ *  explaining what that half is for. Adding is the FAB's job, not the header's. */
 @Composable
 private fun ListSection(
     title: String,
     caption: String,
     accent: Color = MaterialTheme.colorScheme.primary,
-    action: String? = null,
-    onAction: (() -> Unit)? = null,
-    actionEnabled: Boolean = true,
 ) {
-    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Column(modifier = Modifier.weight(1f)) {
-            SectionHeader(title, accent = accent)
-            Spacer(Modifier.height(2.dp))
-            Text(
-                caption,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(start = 14.dp),   // aligns under the title
-            )
-        }
-        if (action != null && onAction != null) {
-            TextButton(onClick = onAction, enabled = actionEnabled) { Text(action) }
-        }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        SectionHeader(title, accent = accent)
+        Spacer(Modifier.height(2.dp))
+        Text(
+            caption,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 14.dp),   // aligns under the title
+        )
     }
     Spacer(Modifier.height(8.dp))
 }

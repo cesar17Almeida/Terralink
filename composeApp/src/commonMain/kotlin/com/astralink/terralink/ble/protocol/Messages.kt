@@ -25,8 +25,9 @@ data class TimeSyncMsg(
 )
 
 // --- data_request (write to CHR_DATA_REQUEST_UUID) ---------------------------
-// (The legacy `weather` characteristic is no longer used by the app -- the air
-// temperature that feeds the LSTM is pushed as timestamped points via `ingest`.)
+// NOTE: `ingest`ed air_temperature points go to the READINGS store, which the
+// LSTM never reads -- it takes TA from the weather cache alone. Feeding the model
+// its air temperature means writing the weather characteristic (see below).
 
 @Serializable
 data class DataRequestMsg(
@@ -54,6 +55,42 @@ data class DataCountRequestMsg(
 
 @Serializable
 data class CountMsg(val count: Long)
+
+/**
+ * data_request: run the LSTM now instead of waiting for the daily cycle. The
+ * station answers on data_response with {count:1} when the run is queued and
+ * {count:0} when it will not happen -- the build has no on-device inference, or
+ * the station is in FORWARD mode, where the model runs off-board.
+ *
+ * The supervisor SAMPLES BEFORE IT INFERS on this path (main.c), because the
+ * model refuses a window whose newest hour is a copy rather than a real reading.
+ */
+@Serializable
+data class InferRequestMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String = Op.INFER,
+)
+
+// --- weather (write to CHR_WEATHER_UUID) ------------------------------------
+// Where the LSTM's air temperature comes from. Normally the LoRa downlink fills
+// this cache from Open-Meteo; this is the same door, opened from the phone.
+// 48 past + 24 future hourly values, oldest first, aligned to whole hours ending
+// at the hour being inferred. Encoded as CBOR float32 (5 B each), so the whole
+// message is ~400 B: over one GATT write, but well inside the firmware's 512 B
+// long-write reassembly buffer.
+
+@Serializable
+data class WeatherData(
+    @SerialName("past_ta_hourly") val pastTaHourly: List<Float>,
+    @SerialName("future_ta_hourly") val futureTaHourly: List<Float>,
+)
+
+@Serializable
+data class WeatherUpdateMsg(
+    val v: Int = PROTOCOL_VERSION,
+    val op: String = Op.WEATHER_UPDATE,
+    val data: WeatherData,
+)
 
 // --- data_response (notify chunks on CHR_DATA_RESPONSE_UUID) ----------------
 

@@ -20,7 +20,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenu
@@ -46,7 +45,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.state.AtLogEntry
@@ -80,8 +78,6 @@ fun SensorConsoleScreen(
     var sending by remember { mutableStateOf(false) }
     var probes by remember { mutableStateOf<List<Sdi12Probe>>(emptyList()) }
     var selected by remember { mutableStateOf<Sdi12Probe?>(null) }
-    var manualGpio by remember { mutableStateOf("") }
-    var advancedOpen by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
 
@@ -100,11 +96,11 @@ fun SensorConsoleScreen(
         }
     }
 
-    // A typed GPIO (advanced) overrides the selected probe; otherwise use the probe's pin.
-    val manualInt = manualGpio.trim().toIntOrNull()
-    val usingManual = advancedOpen && manualInt != null
-    val effectiveGpio: Int? = if (usingManual) manualInt else selected?.gpio
-    val addr: String = if (usingManual) "0" else (selected?.addr ?: "0")
+    // The console only ever talks to a CONFIGURED probe: the pin and the address come
+    // from its slot, never from something typed in. Driving an arbitrary GPIO with
+    // SDI-12 signalling could land on the LoRa UART or on an actuator's output.
+    val effectiveGpio: Int? = selected?.gpio
+    val addr: String = selected?.addr ?: "0"
 
     fun log(b: ProbeBubble) {
         bubbles.add(b)
@@ -151,16 +147,12 @@ fun SensorConsoleScreen(
                 .imePadding()
                 .dismissKeyboardOnTap(),
         ) {
-            // Target picker: a dropdown of configured SDI-12 probes (or an empty state
-            // that leads to the wizard), plus a collapsed advanced manual-GPIO option.
+            // Target picker: a dropdown of configured SDI-12 probes, or an empty state
+            // that leads to the wizard.
             Sdi12Target(
                 probes = probes,
                 selected = selected,
-                onSelect = { selected = it; advancedOpen = false; manualGpio = "" },
-                manualGpio = manualGpio,
-                onManualChange = { manualGpio = it.filter { c -> c.isDigit() } },
-                advancedOpen = advancedOpen,
-                onToggleAdvanced = { advancedOpen = !advancedOpen },
+                onSelect = { selected = it },
                 onAddSensor = onAddSensor,
             )
 
@@ -241,10 +233,6 @@ private fun Sdi12Target(
     probes: List<Sdi12Probe>,
     selected: Sdi12Probe?,
     onSelect: (Sdi12Probe) -> Unit,
-    manualGpio: String,
-    onManualChange: (String) -> Unit,
-    advancedOpen: Boolean,
-    onToggleAdvanced: () -> Unit,
     onAddSensor: () -> Unit,
 ) {
     Column(
@@ -253,8 +241,6 @@ private fun Sdi12Target(
     ) {
         if (probes.isEmpty()) EmptyProbes(onAddSensor)
         else ProbeDropdown(probes, selected, onSelect)
-
-        AdvancedManualGpio(manualGpio, onManualChange, advancedOpen, onToggleAdvanced)
     }
 }
 
@@ -325,30 +311,6 @@ private fun ProbeDropdown(
                 )
             }
         }
-    }
-}
-
-@Composable
-private fun AdvancedManualGpio(
-    manualGpio: String,
-    onManualChange: (String) -> Unit,
-    advancedOpen: Boolean,
-    onToggleAdvanced: () -> Unit,
-) {
-    Text(
-        text = if (advancedOpen) "Avanzado ▴" else "Avanzado ▾",
-        style = MaterialTheme.typography.labelLarge,
-        color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.clickable(onClick = onToggleAdvanced),
-    )
-    if (advancedOpen) {
-        TerraTextField(
-            value = manualGpio,
-            onValueChange = onManualChange,
-            label = "GPIO manual",
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            supportingText = { Text("Habla con una sonda no configurada indicando su pin de datos.") },
-        )
     }
 }
 

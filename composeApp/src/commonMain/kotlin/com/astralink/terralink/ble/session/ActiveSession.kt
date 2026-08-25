@@ -29,6 +29,10 @@ import com.astralink.terralink.ble.protocol.CHR_PINMAP_UUID
 import com.astralink.terralink.ble.protocol.ClearRequestMsg
 import com.astralink.terralink.ble.protocol.ConfigAckMsg
 import com.astralink.terralink.ble.protocol.CHR_DATA_REQUEST_UUID
+import com.astralink.terralink.ble.protocol.CHR_WEATHER_UUID
+import com.astralink.terralink.ble.protocol.InferRequestMsg
+import com.astralink.terralink.ble.protocol.WeatherData
+import com.astralink.terralink.ble.protocol.WeatherUpdateMsg
 import com.astralink.terralink.ble.util.authProof
 import com.astralink.terralink.ble.util.passwordKey
 import com.astralink.terralink.ble.protocol.CHR_DATA_RESPONSE_UUID
@@ -446,6 +450,43 @@ class ActiveSession internal constructor(
     @OptIn(ExperimentalSerializationApi::class)
     suspend fun requestLogs(): List<String> =
         SaviaCbor.decodeFromByteArray<List<String>>(requestData(DataKind.LOGS))
+
+    /**
+     * Ask the station to run the LSTM now rather than at its daily hour. Returns
+     * true when the run was queued; false means it will not happen -- the build
+     * has no on-device inference, or the station is in FORWARD mode. The station
+     * samples every input slot before inferring, so this can be called at any
+     * minute without leaving the model a copied newest hour.
+     *
+     * The forecast lands in the predictions store a few seconds later; poll
+     * [requestPredictions] rather than expecting it in this reply.
+     */
+    @OptIn(ExperimentalSerializationApi::class)
+    suspend fun requestInference(): Boolean {
+        val chunks = runDataRequest {
+            connection.write(CHR_DATA_REQUEST_UUID, encode(InferRequestMsg()))
+        }
+        return SaviaCbor.decodeFromByteArray<CountMsg>(chunkedDecode(chunks)).count > 0
+    }
+
+    /**
+     * Fill the station's air-temperature cache -- the only source the LSTM reads
+     * TA from. Normally the LoRa downlink does this from Open-Meteo; this is the
+     * same cache, written over BLE when a phone is present.
+     *
+     * [past] is oldest-first and must end at the hour being inferred; [future] is
+     * the next hours in order. The firmware clamps both to 48 / 24.
+     *
+     * ~400 B of CBOR: more than one GATT write, so this relies on the platform's
+     * long write and the firmware's prepared-write reassembly. Both exist.
+     */
+    suspend fun pushWeather(past: List<Float>, future: List<Float>) {
+        require(past.isNotEmpty()) { "the weather cache needs a past window" }
+        connection.write(
+            CHR_WEATHER_UUID,
+            encode(WeatherUpdateMsg(data = WeatherData(pastTaHourly = past, futureTaHourly = future))),
+        )
+    }
 
     /** Dev: wipe all stored data on the station. */
     suspend fun clearData() {

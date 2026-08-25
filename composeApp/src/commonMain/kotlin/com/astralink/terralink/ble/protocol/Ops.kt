@@ -17,6 +17,10 @@ object Op {
     const val AT = "at"                  // raw AT terminal: {cmd?} queues a command, returns {seq,cmd,lines}
     const val SDI12 = "sdi12"            // raw SDI-12 console: {cmd,gpio} queues, returns {seq,cmd,lines}
     const val ACT = "act"                // drive a digital actuator slot: {port,on} (auth-gated)
+    const val INFER = "infer"            // ask the station to run the LSTM now; ack {count:1} = queued
+
+    // weather write (client -> server), on CHR_WEATHER_UUID
+    const val WEATHER_UPDATE = "upd"     // {data:{past_ta_hourly:[..48], future_ta_hourly:[..24]}}
 
     // data_response notify chunks
     const val CHUNK = "chunk"
