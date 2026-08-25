@@ -11,8 +11,10 @@ import com.astralink.terralink.ble.session.SaviaSession
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.StationsRepository
 import com.astralink.terralink.ui.ConfigurationScreen
+import com.astralink.terralink.ui.AccuracyScreen
 import com.astralink.terralink.ui.ConnectivityScreen
 import com.astralink.terralink.ui.DeviceScreen
+import com.astralink.terralink.ui.LifecycleScreen
 import com.astralink.terralink.ui.LogsScreen
 import com.astralink.terralink.ui.LoraConsoleScreen
 import com.astralink.terralink.ui.PinMapScreen
@@ -42,6 +44,11 @@ private sealed interface Screen {
     data class SensorConsole(val station: SavedStation) : Screen
     data class Connectivity(val station: SavedStation) : Screen
     data class PinMap(val station: SavedStation) : Screen
+    data class Lifecycle(val station: SavedStation) : Screen
+
+    /** Reachable from the station menu AND from inside Lifecycle, so it has to
+     *  remember which one to go back to. */
+    data class Accuracy(val station: SavedStation, val fromLifecycle: Boolean) : Screen
 }
 
 @Composable
@@ -110,6 +117,14 @@ fun App() {
                 onOpenPinMap = { active ->
                     activeSession = active
                     screen = Screen.PinMap(current.station)
+                },
+                onOpenLifecycle = { active ->
+                    activeSession = active
+                    screen = Screen.Lifecycle(current.station)
+                },
+                onOpenAccuracy = { active ->
+                    activeSession = active
+                    screen = Screen.Accuracy(current.station, fromLifecycle = false)
                 },
                 onBack = {
                     activeSession = null
@@ -237,6 +252,38 @@ fun App() {
                         active = active,
                         onOpenLoraConsole = { screen = Screen.Lora(current.station) },
                         onBack = { screen = Screen.Device(current.station) },
+                    )
+                }
+            }
+
+            is Screen.Lifecycle -> {
+                val active = activeSession
+                if (active == null) {
+                    screen = Screen.Device(current.station)
+                } else {
+                    LifecycleScreen(
+                        station = current.station,
+                        active = active,
+                        onOpenAccuracy = {
+                            screen = Screen.Accuracy(current.station, fromLifecycle = true)
+                        },
+                        onBack = { screen = Screen.Device(current.station) },
+                    )
+                }
+            }
+
+            is Screen.Accuracy -> {
+                val active = activeSession
+                if (active == null) {
+                    screen = Screen.Device(current.station)
+                } else {
+                    AccuracyScreen(
+                        station = current.station,
+                        active = active,
+                        onBack = {
+                            screen = if (current.fromLifecycle) Screen.Lifecycle(current.station)
+                                     else Screen.Device(current.station)
+                        },
                     )
                 }
             }

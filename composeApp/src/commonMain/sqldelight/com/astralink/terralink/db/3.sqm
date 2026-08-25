@@ -1,0 +1,32 @@
+-- v3 -> v4: add the timeline journal (StationEvent) and the forecast archive
+-- (Forecast) that back the "Ciclo de vida" and "Predicción vs real" screens.
+--
+-- Both tables ship after the first releases, so a database created at v1..v3 has
+-- neither and would crash on the timeline's first query ("no such table:
+-- StationEvent"). Fresh installs get them from the generated Schema.create; this
+-- migration brings existing installs up to v4. IF NOT EXISTS keeps it safe if a
+-- table happens to already be present.
+CREATE TABLE IF NOT EXISTS StationEvent (
+    station_id TEXT    NOT NULL,
+    ts_ms      INTEGER NOT NULL,
+    kind       TEXT    NOT NULL,
+    port       INTEGER NOT NULL,
+    ok         INTEGER NOT NULL,
+    detail     TEXT    NOT NULL,
+    PRIMARY KEY (station_id, ts_ms, kind, port)
+);
+
+CREATE INDEX IF NOT EXISTS station_event_ts ON StationEvent(station_id, ts_ms);
+
+CREATE TABLE IF NOT EXISTS Forecast (
+    station_id TEXT    NOT NULL,
+    issued_ms  INTEGER NOT NULL,
+    target_ms  INTEGER NOT NULL,
+    model      TEXT    NOT NULL,
+    kind       TEXT    NOT NULL,
+    value      REAL    NOT NULL,
+    horizon_h  INTEGER NOT NULL,
+    PRIMARY KEY (station_id, issued_ms, target_ms, kind)
+);
+
+CREATE INDEX IF NOT EXISTS forecast_target ON Forecast(station_id, kind, target_ms);

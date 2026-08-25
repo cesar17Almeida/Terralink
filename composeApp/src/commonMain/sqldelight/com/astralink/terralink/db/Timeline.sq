@@ -1,0 +1,105 @@
+-- The station's life story, kept by the app.
+--
+-- The firmware has no event journal: it holds ~48 h of readings, the LAST
+-- forecast, a 24-line log ring and a handful of "last time X happened"
+-- timestamps in its status. None of that survives a power cycle, and none of it
+-- is a history. So the app writes one: every time it connects it harvests what
+-- the station can still tell it about its recent past and appends the new events
+-- here. Across connections this accumulates into the timeline the station itself
+-- can't remember, without a single byte of firmware change.
+
+-- One thing the station did (or a scheduled thing the app confirmed happened).
+-- `port` carries -1 (not NULL) for station-wide events so the composite primary
+-- key dedups them: SQLite treats NULLs as distinct, so a NULL port would let the
+-- same event in twice on the next harvest. Same trick as Reading.depth_cm.
+CREATE TABLE StationEvent (
+    station_id TEXT    NOT NULL,
+    ts_ms      INTEGER NOT NULL,   -- epoch UTC ms of the event
+    kind       TEXT    NOT NULL,   -- 'sample'|'lora_up'|'lora_down'|'lstm'|'sync'|'boot'
+    port       INTEGER NOT NULL,   -- sensor port for 'sample'; -1 for station-wide
+    ok         INTEGER NOT NULL,   -- 0 = it failed (shows as a fault mark)
+    detail     TEXT    NOT NULL,   -- one line for the detail bar
+    PRIMARY KEY (station_id, ts_ms, kind, port)
+);
+
+CREATE INDEX station_event_ts ON StationEvent(station_id, ts_ms);
+
+-- One point of one archived LSTM forecast. Archiving is what makes "predicted vs
+-- real" possible at all: the station only ever holds its newest forecast, so
+-- unless the app keeps a copy at the moment it reads it, the prediction is gone
+-- by the time reality catches up with it. Keyed by (issued, target) so the same
+-- forecast re-read twice dedups, and two forecasts for the same hour issued at
+-- different times both survive.
+CREATE TABLE Forecast (
+    station_id TEXT    NOT NULL,
+    issued_ms  INTEGER NOT NULL,   -- when the station ran the inference
+    target_ms  INTEGER NOT NULL,   -- the hour the value is about
+    model      TEXT    NOT NULL,   -- 'lstm-hs30'
+    kind       TEXT    NOT NULL,   -- 'hs30_forecast'
+    value      REAL    NOT NULL,   -- VWC 0..1
+    horizon_h  INTEGER NOT NULL,   -- H+1..H+24
+    PRIMARY KEY (station_id, issued_ms, target_ms, kind)
+);
+
+CREATE INDEX forecast_target ON Forecast(station_id, kind, target_ms);
+
+-- --- StationEvent ----------------------------------------------------------
+
+insertEvent:
+INSERT OR IGNORE INTO StationEvent(station_id, ts_ms, kind, port, ok, detail)
+VALUES (?, ?, ?, ?, ?, ?);
+
+selectEventsByRange:
+SELECT *
+FROM StationEvent
+WHERE station_id = ?
+  AND ts_ms >= ?
+  AND ts_ms <  ?
+ORDER BY ts_ms ASC
+LIMIT ?;
+
+maxEventTs:
+SELECT MAX(ts_ms) FROM StationEvent WHERE station_id = ? AND kind = ?;
+
+countEvents:
+SELECT COUNT(*) FROM StationEvent WHERE station_id = ?;
+
+deleteEventsByStation:
+DELETE FROM StationEvent WHERE station_id = ?;
+
+-- Keep the journal bounded: drop everything older than the given instant.
+pruneEventsBefore:
+DELETE FROM StationEvent WHERE station_id = ? AND ts_ms < ?;
+
+-- --- Forecast --------------------------------------------------------------
+
+insertForecast:
+INSERT OR IGNORE INTO Forecast(station_id, issued_ms, target_ms, model, kind, value, horizon_h)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+
+selectForecastByRange:
+SELECT *
+FROM Forecast
+WHERE station_id = ?
+  AND kind = ?
+  AND target_ms >= ?
+  AND target_ms <  ?
+ORDER BY target_ms ASC, issued_ms ASC;
+
+-- The newest forecast the station has published (all its horizon steps).
+selectLatestForecast:
+SELECT *
+FROM Forecast
+WHERE station_id = ?
+  AND kind = ?
+  AND issued_ms = (SELECT MAX(issued_ms) FROM Forecast WHERE station_id = ? AND kind = ?)
+ORDER BY target_ms ASC;
+
+countForecastRuns:
+SELECT COUNT(DISTINCT issued_ms) FROM Forecast WHERE station_id = ? AND kind = ?;
+
+deleteForecastByStation:
+DELETE FROM Forecast WHERE station_id = ?;
+
+pruneForecastBefore:
+DELETE FROM Forecast WHERE station_id = ? AND target_ms < ?;

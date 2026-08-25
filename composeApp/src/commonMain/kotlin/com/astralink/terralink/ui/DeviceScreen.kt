@@ -90,6 +90,8 @@ fun DeviceScreen(
     onOpenConnectivity: (ActiveSession) -> Unit,
     onOpenSensors: (ActiveSession) -> Unit,
     onOpenPinMap: (ActiveSession) -> Unit,
+    onOpenLifecycle: (ActiveSession) -> Unit,
+    onOpenAccuracy: (ActiveSession) -> Unit,
     onBack: () -> Unit,
 ) {
     var state by remember { mutableStateOf<ConnState>(ConnState.Connecting) }
@@ -159,6 +161,8 @@ fun DeviceScreen(
                     onOpenConnectivity = { onOpenConnectivity(s.session) },
                     onOpenSensors = { onOpenSensors(s.session) },
                     onOpenPinMap = { onOpenPinMap(s.session) },
+                    onOpenLifecycle = { onOpenLifecycle(s.session) },
+                    onOpenAccuracy = { onOpenAccuracy(s.session) },
                 )
             }
         }
@@ -261,6 +265,8 @@ private fun ReadyPanel(
     onOpenConnectivity: () -> Unit,
     onOpenSensors: () -> Unit,
     onOpenPinMap: () -> Unit,
+    onOpenLifecycle: () -> Unit,
+    onOpenAccuracy: () -> Unit,
 ) {
     // How many readings the station currently holds (mostly mock data today).
     var readingCount by remember(session) { mutableStateOf<Long?>(null) }
@@ -294,6 +300,8 @@ private fun ReadyPanel(
             onOpenConnectivity = onOpenConnectivity,
             onOpenSensors = onOpenSensors,
             onOpenPinMap = onOpenPinMap,
+            onOpenLifecycle = onOpenLifecycle,
+            onOpenAccuracy = onOpenAccuracy,
         )
     }
 
@@ -316,6 +324,8 @@ private fun TileGrid(
     onOpenConnectivity: () -> Unit,
     onOpenSensors: () -> Unit,
     onOpenPinMap: () -> Unit,
+    onOpenLifecycle: () -> Unit,
+    onOpenAccuracy: () -> Unit,
 ) {
     // Two tiles per row: wider cards so titles/captions no longer truncate.
     // An odd count leaves one empty half-slot on the last row.
@@ -332,7 +342,7 @@ private fun TileGrid(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             PremiumTile(
-                title = "Sensores", caption = "Entradas y salidas", icon = TerraIcons.Sensors,
+                title = "Periféricos", caption = "Sensores y actuadores", icon = TerraIcons.Sensors,
                 onClick = onOpenSensors, modifier = Modifier.weight(1f),
             )
             PremiumTile(
@@ -348,6 +358,16 @@ private fun TileGrid(
             PremiumTile(
                 title = "Mapa de pines", caption = "GPIO de la estación", icon = TerraIcons.Memory,
                 onClick = onOpenPinMap, modifier = Modifier.weight(1f),
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            PremiumTile(
+                title = "Ciclo de vida", caption = "Pasado y futuro", icon = TerraIcons.Timeline,
+                onClick = onOpenLifecycle, modifier = Modifier.weight(1f),
+            )
+            PremiumTile(
+                title = "Predicción vs real", caption = "Acierto del LSTM", icon = TerraIcons.Target,
+                onClick = onOpenAccuracy, modifier = Modifier.weight(1f),
             )
         }
     }

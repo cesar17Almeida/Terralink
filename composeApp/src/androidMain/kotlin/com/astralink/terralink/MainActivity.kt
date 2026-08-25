@@ -10,9 +10,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
 import com.astralink.terralink.ble.AndroidBleContext
+import com.astralink.terralink.state.ForecastArchive
 import com.astralink.terralink.state.LoraConsoleRepository
 import com.astralink.terralink.state.ReadingsRepository
 import com.astralink.terralink.state.StationsRepository
+import com.astralink.terralink.state.TimelineRepository
 import com.astralink.terralink.state.createStationsDataStore
 import com.astralink.terralink.state.createTerralinkDb
 
@@ -30,6 +32,8 @@ class MainActivity : ComponentActivity() {
         val db = createTerralinkDb()
         ReadingsRepository.init(db)
         LoraConsoleRepository.init(db)
+        TimelineRepository.init(db)
+        ForecastArchive.init(db)
         requestPermissions.launch(blePermissions())
 
         setContent {
