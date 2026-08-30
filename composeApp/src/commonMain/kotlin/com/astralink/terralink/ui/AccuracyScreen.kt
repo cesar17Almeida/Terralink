@@ -211,10 +211,7 @@ private fun AccuracyContent(
         SeriesBadge(key.longLabel(), unit)
         Spacer(Modifier.height(12.dp))
         Text(
-            "El LSTM predice 24 h de ${key.longLabel().substringBefore(" ·")}. Cada " +
-                "pronóstico se archiva al leerlo, porque la estación sólo guarda el " +
-                "último; estas son las horas que ya se han medido, frente a lo que el " +
-                "modelo había predicho para ellas.",
+            "Horas ya medidas frente a lo que el LSTM predijo para ellas.",
             modifier = Modifier.widthIn(max = 320.dp),
             style = TextStyle(fontSize = 12.5.sp, lineHeight = 20.sp, color = t.muted),
         )
@@ -296,8 +293,8 @@ private fun CoverageNote(load: LifecycleLoad, scored: Int, unscored: Int) {
             "Hay ${load.forecastRuns} pronóstico(s) archivado(s), pero ninguna de sus " +
                 "horas se ha medido aún. $pending hora(s) siguen por delante."
         else ->
-            "$scored hora(s) comparadas sobre ${load.forecastRuns} pronóstico(s) archivado(s). " +
-                "$pending por delante; $unscored hora(s) medidas sin predicción que las cubra."
+            "$scored h comparadas · ${load.forecastRuns} pronóstico(s) · $pending h por delante" +
+                (if (unscored > 0) " · $unscored h sin pronóstico" else "")
     }
     Text(text, style = TextStyle(fontSize = 12.sp, lineHeight = 19.sp, color = t.faint))
 }

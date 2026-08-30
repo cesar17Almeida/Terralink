@@ -180,8 +180,7 @@ private fun PinMapHeader(stationName: String, onBack: () -> Unit) {
     )
     Spacer(Modifier.height(10.dp))
     Text(
-        "Asignación real de GPIO de la estación. Los pines en uso por sensores o " +
-            "periféricos no se ofrecen al añadir un sensor.",
+        "Los pines en uso o reservados no se ofrecen al añadir sensores.",
         modifier = Modifier.widthIn(max = 296.dp),
         style = TextStyle(fontSize = 12.5.sp, lineHeight = 20.sp, color = t.muted),
     )

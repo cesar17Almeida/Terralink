@@ -166,9 +166,7 @@ fun SensorConsoleScreen(
                 if (bubbles.isEmpty()) {
                     item {
                         Text(
-                            text = "Habla directamente con una sonda SDI-12: elige la sonda arriba y envía un " +
-                                "comando (p. ej. 0I! identificar, 0M! medir, 0D0! leer datos). El móvil lo manda " +
-                                "por BLE; la estación lo bit-banguea en el pin y muestra la respuesta.",
+                            text = "Comandos SDI-12 a la sonda elegida: 0I! identifica, 0M! mide, 0D0! lee.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 8.dp),

@@ -127,8 +127,7 @@ fun LoraConsoleScreen(
                 if (bubbles.isEmpty()) {
                     item {
                         Text(
-                            text = "Envía un comando AT al módulo Wio-E5 (p. ej. AT, AT+VER, AT+JOIN). " +
-                                "El móvil lo manda por BLE; la estación lo reenvía por UART y muestra la respuesta.",
+                            text = "Comandos AT al módulo LoRa (Wio-E5).",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 8.dp),

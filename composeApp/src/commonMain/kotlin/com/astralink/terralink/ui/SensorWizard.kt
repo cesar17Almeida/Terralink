@@ -247,7 +247,7 @@ private fun KindStep(draft: SensorDraft, picked: Boolean, onPick: (output: Boole
     val output = isOutputType(draft.type)
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text(
-            "Un sensor mide y guarda lecturas. Un actuador se enciende y se apaga desde la app.",
+            "Un sensor mide; un actuador se enciende y apaga desde la app.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -340,7 +340,7 @@ private fun MappingStep(
     when (draft.type) {
         "sdi12_aquacheck" -> AddrField(draft, onProbe, onChange) {
             Text(
-                "La AquaCheck tiene un formato fijo (humedad por profundidad); sólo necesita su dirección SDI-12.",
+                "Formato fijo por profundidad; solo necesita la dirección SDI-12.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

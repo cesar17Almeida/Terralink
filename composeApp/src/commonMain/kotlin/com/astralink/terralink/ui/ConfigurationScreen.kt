@@ -931,10 +931,9 @@ private fun ModelCard(
             Spacer(Modifier.height(12.dp))
             Text(
                 text = when {
-                    !inferDev -> "Este firmware no incluye el modelo en el dispositivo, así que la " +
-                        "inferencia se hace fuera (nube/app). La estación sólo sirve los datos de entrada."
-                    inferMode == "local" -> "La estación ejecuta el LSTM localmente y publica el resultado."
-                    else -> "La estación sirve los datos de entrada; el modelo se ejecuta en la nube o la app."
+                    !inferDev -> "Este firmware no incluye el modelo; la inferencia se hace en la nube o en la app."
+                    inferMode == "local" -> "El LSTM se ejecuta en la estación."
+                    else -> "La estación sirve los datos; el modelo se ejecuta en la nube o en la app."
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -989,12 +988,9 @@ private fun ModelCard(
         Spacer(Modifier.height(10.dp))
         Text(
             text = if (inferMode == "local") {
-                "Justo antes de predecir toma una medida, para que la última hora de la " +
-                    "ventana sea real y no una copia. Necesita 24 h de humedad y el pronóstico " +
-                    "de temperatura; si falta algo, no predice y lo anota en el registro."
+                "Mide justo antes de predecir. Necesita 24 h de humedad y el pronóstico de temperatura."
             } else {
-                "Con el modelo fuera del dispositivo esta hora no dispara ninguna predicción: " +
-                    "la estación sólo sirve los datos. Se guarda para cuando vuelvas a ejecutarlo aquí."
+                "Con el modelo fuera de la estación esta hora no predice; se conserva por si vuelves al modo local."
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

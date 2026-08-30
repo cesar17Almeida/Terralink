@@ -359,7 +359,7 @@ private fun SensorsReady(
                 // draw from the same pool of slots, so the row keeps its index into
                 // `sensors` -- that index is what edit/delete address.
                 val (outputs, inputs) = sensors.withIndex().partition { it.value.type == SensorType.ACTUATOR }
-                ListSection("Sensores", "Miden y guardan lecturas")
+                ListSection("Sensores", "Entradas")
                 if (inputs.isEmpty()) {
                     ListSectionEmpty("Ningún sensor configurado.")
                 } else {
@@ -372,7 +372,7 @@ private fun SensorsReady(
                 }
                 Spacer(Modifier.height(20.dp))
                 ListSection(
-                    "Actuadores", "Se accionan desde aquí; no generan lecturas",
+                    "Actuadores", "Salidas digitales; se accionan aquí",
                     accent = MaterialTheme.colorScheme.tertiary,
                 )
                 if (outputs.isEmpty()) {

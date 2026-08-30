@@ -372,7 +372,7 @@ internal fun ChannelKindChips(selected: String, onPick: (String) -> Unit) {
 internal fun CadenceFields(draft: SensorDraft, onChange: (SensorDraft) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(
-            "Cada cuánto se lee este sensor. Por defecto sigue la cadencia global de captura de la estación.",
+            "Cadencia propia de este sensor; en blanco sigue la global.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -484,7 +484,7 @@ internal fun PinField(
         // of letting the user pick one the station will refuse.
         pinmapWarning?.let { WarningCard(it) }
         Text(
-            if (two) "El HC-SR04 usa dos pines: trigger (salida) y echo (entrada). Elige la ranura y toca su pin."
+            if (two) "Dos pines: trigger (salida) y echo (entrada). Elige la ranura y toca su pin."
             else if (info.output) "Toca un pin resaltado. El actuador lo usará como salida digital."
             else "Toca un pin resaltado. ${info.label} necesita un pin $capName.",
             style = MaterialTheme.typography.bodySmall,

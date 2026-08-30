@@ -71,7 +71,6 @@ import com.astralink.terralink.util.nowMs
 import kotlinx.coroutines.launch
 
 private const val KIND_HS30_FORECAST = "hs30_forecast"
-private const val KIND_RECOMMENDATION = "water_recommendation"
 
 // The LSTM's past window: 48 HOURLY steps per series. What advances it is a new
 // hour, not a new reading -- everything inside one clock hour is aggregated into a
@@ -319,7 +318,6 @@ private fun PredictionsContent(
     onReload: () -> Unit,
 ) {
     val forecast = predictions.filter { it.kind == KIND_HS30_FORECAST }.sortedBy { it.tsMs }
-    val recommendation = predictions.lastOrNull { it.kind == KIND_RECOMMENDATION }?.value?.toInt()
 
     Column(
         modifier = Modifier
@@ -332,15 +330,19 @@ private fun PredictionsContent(
 
         if (predictions.isEmpty()) {
             Text(
-                "Aún no hay predicciones; se generan a la hora de predicción automática, si hay datos suficientes (Configuración › Modelo e inferencia).",
+                "Sin predicciones todavía. Se generan a la hora de predicción configurada.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else if (forecast.isNotEmpty()) {
-            LastPredictionCard(forecast = forecast, recommendation = recommendation)
+            LastPredictionCard(forecast = forecast)
             ForecastCard(forecast)
         } else {
-            RecommendationCard(recommendation)
+            Text(
+                "La estación no tiene un pronóstico HS30 disponible.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
 
         // Dev: ask the station to publish a synthetic 24 h LSTM forecast (hidden unless dev mode).
@@ -440,9 +442,7 @@ private fun InferenceProgressCard(
             }
             Spacer(Modifier.height(10.dp))
             Text(
-                "Cada paso es una hora de reloj: las lecturas de una misma hora se " +
-                    "promedian en un solo valor. Por debajo de $MIN_HOURS h la estación no " +
-                    "infiere, y hasta las $WINDOW_HOURS h rellena los huecos con el último valor.",
+                "Una hora, una casilla. Mínimo $MIN_HOURS h reales; hasta $WINDOW_HOURS h los huecos se rellenan con el último valor.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -517,23 +517,13 @@ private fun SeriesRow(label: String, taken: Int, target: Int) {
 }
 
 @Composable
-private fun LastPredictionCard(forecast: List<Prediction>, recommendation: Int?) {
+private fun LastPredictionCard(forecast: List<Prediction>) {
     val values = forecast.map { it.value }
     val min = values.min()
     val max = values.max()
     val model = forecast.firstOrNull()?.model ?: "lstm-hs30"
     val confidence = forecast.mapNotNull { it.confidence }.takeIf { it.isNotEmpty() }?.average()
 
-    val (recoLabel, recoDetail) = when (recommendation) {
-        1 -> "Regar mañana" to "El modelo prevé estrés hídrico en las próximas 24 h."
-        0 -> "No regar" to "La humedad prevista se mantiene en rango saludable."
-        else -> "Sin recomendación" to "Aún no hay salida del clasificador."
-    }
-    val accent = when (recommendation) {
-        1 -> MaterialTheme.colorScheme.tertiary    // riego -> agua (teal)
-        0 -> MaterialTheme.colorScheme.primary     // sano -> verde
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
 
     val specs = buildList {
         add(Spec("Modelo", model))
@@ -551,40 +541,11 @@ private fun LastPredictionCard(forecast: List<Prediction>, recommendation: Int?)
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
     ) {
         Column(modifier = Modifier.padding(20.dp)) {
-            SectionHeader("Última predicción", accent = accent)
+            SectionHeader("Última predicción", accent = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.height(12.dp))
-            Text(recoLabel, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(4.dp))
-            Text(
-                recoDetail,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Text("Humedad a 30 cm (HS30)", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(16.dp))
             SpecTable(rows = specs)
-        }
-    }
-}
-
-@Composable
-private fun RecommendationCard(recommendation: Int?) {
-    val (label, detail) = when (recommendation) {
-        1 -> "Regar mañana" to "El modelo prevé estrés hídrico en las próximas 24 h."
-        0 -> "No regar" to "La humedad prevista se mantiene en rango saludable."
-        else -> "Sin recomendación" to "No hay salida del clasificador todavía."
-    }
-    ElevatedCard(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
-    ) {
-        Column(modifier = Modifier.padding(20.dp)) {
-            Text("Recomendación de riego", style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(6.dp))
-            Text(label, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(8.dp))
-            Text(detail, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
