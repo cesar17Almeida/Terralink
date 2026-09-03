@@ -1,6 +1,7 @@
 // The bar under the track: the legend when nothing is picked, the picked event's
 // story when something is. Same slot either way, so selecting doesn't move the
-// track under the user's thumb.
+// track under the user's thumb. Hosted as the Scaffold's bottom bar, so it is
+// always drawn whole and reaches the bottom edge of the screen.
 package com.astralink.terralink.ui.components.timeline
 
 import androidx.compose.foundation.background
@@ -16,12 +17,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -37,6 +41,7 @@ import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import com.astralink.terralink.timeline.EventKind
 import com.astralink.terralink.timeline.StationEvent
+import com.astralink.terralink.ui.components.TerraIcons
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -53,9 +58,10 @@ fun EventDetailBar(
         color = t.sheet,
         shadowElevation = 6.dp,
     ) {
-        Column {
+        // The surface runs under the gesture bar / home indicator; the content stops above it.
+        Column(Modifier.navigationBarsPadding()) {
             HorizontalDivider(color = t.hairline)
-            Box(Modifier.padding(horizontal = 22.dp, vertical = 16.dp).heightIn(min = 86.dp)) {
+            Box(Modifier.padding(horizontal = 22.dp, vertical = 16.dp).heightIn(min = 66.dp)) {
                 if (event == null) Legend() else EventCard(event, nowMs, utcOffsetMin, onClear)
             }
         }
@@ -81,6 +87,10 @@ private fun EventCard(event: StationEvent, nowMs: Long, utcOffsetMin: Int, onCle
         future -> t.muted
         else -> t.accent
     }
+    // One muted line: what the event is, then when, on the station's own clock.
+    val story = listOf(event.detail, relativeTo(event.tsMs, nowMs))
+        .filter { it.isNotBlank() }
+        .joinToString(" · ")
 
     Row(verticalAlignment = Alignment.Top) {
         Column(Modifier.weight(1f)) {
@@ -98,21 +108,15 @@ private fun EventCard(event: StationEvent, nowMs: Long, utcOffsetMin: Int, onCle
                     style = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = t.ink),
                 )
             }
-            if (event.detail.isNotBlank()) {
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    event.detail,
-                    style = TextStyle(fontSize = 12.5.sp, lineHeight = 19.sp, color = t.muted),
-                )
-            }
-            Spacer(Modifier.height(9.dp))
+            Spacer(Modifier.height(6.dp))
             Text(
-                relativeTo(event.tsMs, nowMs).uppercase(),
-                style = eyebrow(t.ghost, 8.5f),
+                story,
+                style = TextStyle(fontSize = 12.5.sp, lineHeight = 19.sp, color = t.muted),
             )
         }
-        Spacer(Modifier.width(14.dp))
-        Column(horizontalAlignment = Alignment.End) {
+        Spacer(Modifier.width(12.dp))
+        // State chip and the close button share the title line, top-right corner.
+        Row(Modifier.height(24.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier
                     .height(22.dp)
@@ -123,13 +127,29 @@ private fun EventCard(event: StationEvent, nowMs: Long, utcOffsetMin: Int, onCle
             ) {
                 Text(chip.uppercase(), style = eyebrow(chipFg, 8f))
             }
-            Spacer(Modifier.height(10.dp))
-            Text(
-                "CERRAR",
-                modifier = Modifier.clickable(onClick = onClear),
-                style = eyebrow(t.faint, 8f),
-            )
+            Spacer(Modifier.width(8.dp))
+            CloseButton(onClear)
         }
+    }
+}
+
+@Composable
+private fun CloseButton(onClick: () -> Unit) {
+    val t = timeTones()
+    Box(
+        Modifier
+            .size(24.dp)
+            .clip(CircleShape)
+            .background(t.alert.copy(alpha = 0.10f))
+            .clickable(onClick = onClick, role = Role.Button),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            TerraIcons.Close,
+            contentDescription = "Cerrar",
+            tint = t.alert,
+            modifier = Modifier.size(13.dp),
+        )
     }
 }
 
@@ -151,7 +171,7 @@ private fun Legend() {
         }
         Spacer(Modifier.height(13.dp))
         Text(
-            "ARRASTRA LA LÍNEA · PELLIZCA PARA ACERCAR · TOCA UNA MARCA",
+            "ARRASTRA · PELLIZCA · TOCA UNA MARCA",
             style = eyebrow(t.ghost, 8.5f),
         )
     }

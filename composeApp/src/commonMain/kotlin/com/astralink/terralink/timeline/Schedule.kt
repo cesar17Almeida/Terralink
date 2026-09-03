@@ -69,7 +69,7 @@ fun projectSchedule(
         while (t < untilMs && guard++ < maxEvents) {
             out += StationEvent(
                 tsMs = t, kind = EventKind.SAMPLE, port = s.port, future = true,
-                detail = "Lectura programada · cada ${humanSeconds(stepS)}",
+                detail = "Cada ${humanSeconds(stepS)}",
             )
             t += step
         }
@@ -86,7 +86,7 @@ fun projectSchedule(
         while (t < untilMs && guard++ < maxEvents) {
             out += StationEvent(
                 tsMs = t, kind = EventKind.LORA_UP, future = true,
-                detail = "Envío programado · cada ${humanSeconds(periodS)}",
+                detail = "Cada ${humanSeconds(periodS)}",
             )
             t += step
         }
@@ -103,19 +103,18 @@ fun projectSchedule(
     )
     var guard = 0
     while (day < untilMs && guard++ < 32) {
-        val at = formatHm(config.dailyHour, config.dailyMin)
         // The sweep the daily cycle forces on every sensor, so the model infers
         // over a real newest hour rather than a copied one.
         for (s in sampled) {
             out += StationEvent(
                 tsMs = day, kind = EventKind.SAMPLE, port = s.port, future = true,
-                detail = "Barrido del ciclo diario ($at)",
+                detail = "Barrido del ciclo diario",
             )
         }
         out += StationEvent(
             tsMs = day, kind = EventKind.LSTM, future = true,
-            detail = if (local) "Inferencia LSTM en la estación · pronóstico HS30 24 h"
-                     else "Ciclo diario ($at) · el LSTM corre fuera (modo reenvío)",
+            detail = if (local) "En la estación · pronóstico HS30 a 24 h"
+                     else "Fuera de la estación (modo reenvío)",
         )
         day += MS_PER_DAY
     }
@@ -161,9 +160,6 @@ private fun floorDiv(a: Long, b: Long): Long {
     val q = a / b
     return if (a % b != 0L && (a xor b) < 0) q - 1 else q
 }
-
-private fun formatHm(h: Int, m: Int): String =
-    h.toString().padStart(2, '0') + ":" + m.toString().padStart(2, '0')
 
 /** A cadence in seconds as the installer set it: "15 min", "1 h", "45 s". */
 internal fun humanSeconds(s: Int): String = when {

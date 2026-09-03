@@ -75,8 +75,15 @@ fun SensorsScreen(
     onOpenConsole: () -> Unit,
     onBack: () -> Unit,
     openWizardOnStart: Boolean = false,
+    // Called once the wizard opened on start has saved: the caller gets its sensor back.
+    onAdded: (() -> Unit)? = null,
 ) {
     var phase by remember { mutableStateOf<SensorsPhase>(SensorsPhase.Loading) }
+    // The add wizard: null = closed. `true` = opened from the FAB, so it starts by
+    // asking sensor-or-actuator; `false` = the caller already said "sensor" and skips
+    // that question. Kept here, above the list: the reload after a save re-creates
+    // the list, and state living there would re-open the wizard from scratch.
+    var addWizard by remember { mutableStateOf<Boolean?>(if (openWizardOnStart) false else null) }
     var reloadKey by remember { mutableStateOf(0) }
     var pinmap by remember { mutableStateOf<PinmapMsg?>(null) }
     var pinmapWarning by remember { mutableStateOf<String?>(null) }
@@ -116,8 +123,9 @@ fun SensorsScreen(
         is SensorsPhase.Ready -> SensorsReady(
             station = station, sensors = p.sensors, pinmap = pinmap,
             pinmapWarning = pinmapWarning, active = active,
-            openWizardOnStart = openWizardOnStart,
+            addWizard = addWizard, onAddWizardChange = { addWizard = it },
             onOpenConsole = onOpenConsole, onBack = onBack, onReload = { reloadKey++ },
+            onAdded = onAdded,
         )
     }
 }
@@ -157,18 +165,16 @@ private fun SensorsReady(
     pinmap: PinmapMsg?,
     pinmapWarning: String?,
     active: ActiveSession,
-    openWizardOnStart: Boolean,
+    addWizard: Boolean?,
+    onAddWizardChange: (Boolean?) -> Unit,
     onOpenConsole: () -> Unit,
     onBack: () -> Unit,
     onReload: () -> Unit,
+    onAdded: (() -> Unit)?,
 ) {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // The add wizard: null = closed. `true` = opened from the FAB, so it starts by
-    // asking sensor-or-actuator; `false` = arrived here to add one (from the SDI-12
-    // console's empty state), which already said "sensor" and skips that question.
-    var addWizard by remember { mutableStateOf<Boolean?>(if (openWizardOnStart) false else null) }
     // Slot index being edited, on its own screen -- one field at a time, no wizard.
     var editSlot by remember { mutableStateOf<Int?>(null) }
     var historyTarget by remember { mutableStateOf<SensorInfo?>(null) }
@@ -270,8 +276,14 @@ private fun SensorsReady(
             pinmapWarning = pinmapWarning,
             busy = savingSensors,
             error = sensorError,
-            onCancel = { addWizard = null; sensorError = null },
-            onSave = { table -> sendSensorTable(table) { addWizard = null; sensorError = null; onReload() } },
+            onCancel = { onAddWizardChange(null); sensorError = null },
+            onSave = { table ->
+                sendSensorTable(table) {
+                    onAddWizardChange(null); sensorError = null
+                    // Opened by a caller (pickKind == false): return the sensor to it.
+                    if (!pickKind && onAdded != null) onAdded() else onReload()
+                }
+            },
             onProbeSdi12Address = probeSdi12Address,
         )
         return
@@ -327,7 +339,7 @@ private fun SensorsReady(
             )
         },
         floatingActionButton = {
-            FloatingActionButton(onClick = { sensorError = null; addWizard = true }) {
+            FloatingActionButton(onClick = { sensorError = null; onAddWizardChange(true) }) {
                 Icon(TerraIcons.Add, contentDescription = "Añadir sensor o actuador")
             }
         },

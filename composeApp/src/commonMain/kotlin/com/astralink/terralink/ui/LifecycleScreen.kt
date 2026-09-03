@@ -7,14 +7,18 @@
 // firmware schedules with. Neither half needs a byte of firmware change.
 package com.astralink.terralink.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -28,6 +32,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.session.ActiveSession
@@ -88,7 +94,20 @@ fun LifecycleScreen(
         }
     }
 
-    Scaffold { innerPadding ->
+    Scaffold(
+        bottomBar = {
+            // Measured on its own by the Scaffold, so a tall track can never squeeze
+            // or clip it: the content above scrolls instead.
+            (phase as? LifePhase.Ready)?.let { p ->
+                EventDetailBar(
+                    event = selectedEvent,
+                    nowMs = p.load.stationNowMs,
+                    utcOffsetMin = p.load.config.utcOffsetMin,
+                    onClear = { selectedEvent = null },
+                )
+            }
+        },
+    ) { innerPadding ->
         Box(Modifier.fillMaxSize().padding(innerPadding)) {
             when (val p = phase) {
                 LifePhase.Loading -> Centered { CircularProgressIndicator() }
@@ -151,55 +170,67 @@ private fun LifecycleContent(
     val day = remember(events, now) { events.dayStats(now) }
     val next = remember(events, now) { events.nextWakeAfter(now) }
 
-    Column(Modifier.fillMaxSize()) {
-        Column(Modifier.padding(horizontal = 22.dp)) {
-            LifecycleHeader(
-                stationName = stationName,
-                title = "Ciclo de vida",
-                clockLabel = hhmm(now + offset * 60_000L) + " · estación",
-                onBack = onBack,
-            )
-            Spacer(Modifier.height(18.dp))
-            SeriesChips(chips, key?.id, onSelectSeries)
-            Spacer(Modifier.height(20.dp))
-            StateRowSection(load, events, now, next)
-            Spacer(Modifier.height(18.dp))
-            TrackControls(
-                unitLabel = series.unit.ifBlank { "sin unidad" },
-                activeZoom = viewport.activeZoom,
-                mode = mode,
-                onZoom = { viewport.setZoom(it) },
-                onMode = onMode,
-            )
-        }
-        Spacer(Modifier.height(12.dp))
-
-        TimelineTrack(
-            data = TrackData(events = events, series = series),
-            viewport = viewport,
-            nowMs = now,
-            mode = mode,
-            selected = selectedEvent,
-            onSelect = onSelectEvent,
-        )
-
-        Column(Modifier.padding(horizontal = 22.dp)) {
-            DayFooter(
-                wakes = day.wakes,
-                asleep = "${(day.asleepFraction * 100).toInt()} %",
-                lora = "${day.loraOk}/${day.loraTotal}",
-                loraHealthy = day.loraOk == day.loraTotal,
-            )
+    val scroll = rememberScrollState()
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().verticalScroll(scroll)) {
+            Column(Modifier.padding(horizontal = 22.dp)) {
+                LifecycleHeader(
+                    stationName = stationName,
+                    title = "Ciclo de vida",
+                    clockLabel = hhmm(now + offset * 60_000L) + " · estación",
+                    onBack = onBack,
+                )
+                Spacer(Modifier.height(18.dp))
+                SeriesChips(chips, key?.id, onSelectSeries)
+                Spacer(Modifier.height(20.dp))
+                StateRowSection(load, events, now, next)
+                Spacer(Modifier.height(18.dp))
+                TrackControls(
+                    unitLabel = series.unit.ifBlank { "sin unidad" },
+                    activeZoom = viewport.activeZoom,
+                    mode = mode,
+                    onZoom = { viewport.setZoom(it) },
+                    onMode = onMode,
+                )
+            }
             Spacer(Modifier.height(12.dp))
-            AccuracyLink(load, onOpenAccuracy)
+
+            TimelineTrack(
+                data = TrackData(events = events, series = series),
+                viewport = viewport,
+                nowMs = now,
+                mode = mode,
+                selected = selectedEvent,
+                onSelect = onSelectEvent,
+            )
+
+            Column(Modifier.padding(horizontal = 22.dp)) {
+                DayFooter(
+                    wakes = day.wakes,
+                    asleep = "${(day.asleepFraction * 100).toInt()} %",
+                    lora = "${day.loraOk}/${day.loraTotal}",
+                    loraHealthy = day.loraOk == day.loraTotal,
+                )
+                Spacer(Modifier.height(12.dp))
+                AccuracyLink(load, onOpenAccuracy)
+                Spacer(Modifier.height(20.dp))
+            }
         }
-        Spacer(Modifier.weight(1f))
-        EventDetailBar(
-            event = selectedEvent,
-            nowMs = now,
-            utcOffsetMin = offset,
-            onClear = { onSelectEvent(null) },
-        )
+        // On short screens the page scrolls; melt the fold into the background so a
+        // line crossing it reads as "more below", not as a cut.
+        if (scroll.canScrollForward) {
+            Box(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(40.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Transparent, MaterialTheme.colorScheme.background),
+                        ),
+                    ),
+            )
+        }
     }
 }
 

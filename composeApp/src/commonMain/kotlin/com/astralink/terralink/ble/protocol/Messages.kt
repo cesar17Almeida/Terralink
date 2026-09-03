@@ -223,6 +223,7 @@ data class ActuatorState(
 data class StatusMsg(
     val v: Int,
     val fw: String,
+    val factory: Boolean = false,                        // never-saved defaults: a fresh board
     val mode: String? = null,                            // inference mode: "local" | "forward"
     @SerialName("now_ms") val nowMs: Long? = null,       // device wall clock, epoch ms (null = unsynced)
     @SerialName("utc_offset_min") val utcOffsetMin: Int? = null,      // station-configured offset
@@ -350,6 +351,9 @@ data class ConfigSnapshotMsg(
     @SerialName("log_level") val logLevel: Int = 1,      // 0=debug, 1=info
     @SerialName("wake_gpio") val wakeGpio: Int,
     @SerialName("lora_period_s") val loraPeriodS: Int = 3600,     // LoRa uplink cadence (s)
+    val lora: Boolean = false,                           // LoRa module enabled
+    @SerialName("lora_tx") val loraTx: Int? = null,      // station UART TX pin (null = unassigned)
+    @SerialName("lora_rx") val loraRx: Int? = null,
     @SerialName("inference_mode") val inferenceMode: String = "forward", // "local" | "forward"
     @SerialName("infer_dev") val inferDev: Boolean = false,       // build supports on-device inference (RO)
     @SerialName("utc_offset_min") val utcOffsetMin: Int = 0,      // station's local UTC offset (may be negative)
@@ -416,6 +420,11 @@ data class ConfigPatchMsg(
     @SerialName("mock") val mock: Boolean? = null,
     @SerialName("log_level") val logLevel: Int? = null,
     @SerialName("lora_period_s") val loraPeriodS: Int? = null,
+    // LoRa module: enable + UART pins. Send the three together to switch it on;
+    // the firmware rejects a pair that is not a free UART TX/RX.
+    val lora: Boolean? = null,
+    @SerialName("lora_tx") val loraTx: Int? = null,
+    @SerialName("lora_rx") val loraRx: Int? = null,
     @SerialName("inference_mode") val inferenceMode: String? = null,   // "local" | "forward"
     @SerialName("utc_offset_min") val utcOffsetMin: Int? = null,       // may be negative
     // Coords: send lat + lon TOGETHER as numbers to set. Both stay null here (and are

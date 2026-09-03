@@ -26,4 +26,10 @@ data class SavedStation(
     val clockReadAtMs: Long? = null,
     /** Station-configured UTC offset (min) at that read; renders its local time. */
     val clockOffsetMin: Int? = null,
+    /**
+     * First-run wizard dismissed while the station still reported factory defaults.
+     * Forgotten as soon as it reports a saved config, so a reflash or a factory
+     * reset offers the wizard again.
+     */
+    val setupSkipped: Boolean = false,
 )

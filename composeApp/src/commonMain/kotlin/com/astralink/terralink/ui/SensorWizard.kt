@@ -430,8 +430,9 @@ private fun MappingStep(
 }
 
 
+/** Back / next / save bar shared by the wizards; `saveLabel` names the last step's action. */
 @Composable
-private fun WizardBar(
+internal fun WizardBar(
     lastStep: Boolean,
     firstStep: Boolean,
     busy: Boolean,
@@ -440,6 +441,9 @@ private fun WizardBar(
     onBack: () -> Unit,
     onNext: () -> Unit,
     onSave: () -> Unit,
+    backLabel: String? = null,        // null = "Cancelar" on the first step, "Atrás" after
+    nextLabel: String = "Siguiente",
+    saveLabel: String = "Guardar",
 ) {
     val last = lastStep
     Row(
@@ -451,15 +455,15 @@ private fun WizardBar(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         OutlinedButton(onClick = onBack, enabled = !busy, modifier = Modifier.weight(1f)) {
-            Text(if (firstStep) "Cancelar" else "Atrás")
+            Text(backLabel ?: if (firstStep) "Cancelar" else "Atrás")
         }
         if (last) {
             Button(onClick = onSave, enabled = canSave && !busy, modifier = Modifier.weight(1f)) {
-                Text(if (busy) "Guardando…" else "Guardar")
+                Text(if (busy) "Guardando…" else saveLabel)
             }
         } else {
             Button(onClick = onNext, enabled = canNext && !busy, modifier = Modifier.weight(1f)) {
-                Text("Siguiente")
+                Text(nextLabel)
             }
         }
     }

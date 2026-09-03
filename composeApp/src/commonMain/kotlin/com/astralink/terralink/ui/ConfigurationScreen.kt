@@ -903,7 +903,7 @@ private fun ConfigGroupCard(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ModelCard(
+internal fun ModelCard(
     inferMode: String,
     inferDev: Boolean,
     onSelect: (String) -> Unit,

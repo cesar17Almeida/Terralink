@@ -92,6 +92,8 @@ fun DeviceScreen(
     onOpenPinMap: (ActiveSession) -> Unit,
     onOpenLifecycle: (ActiveSession) -> Unit,
     onOpenAccuracy: (ActiveSession) -> Unit,
+    onOpenSoilProbe: (ActiveSession) -> Unit,
+    onSetup: (ActiveSession) -> Unit,
     onBack: () -> Unit,
 ) {
     var state by remember { mutableStateOf<ConnState>(ConnState.Connecting) }
@@ -119,6 +121,17 @@ fun DeviceScreen(
             ConnState.Failed(e.message ?: e::class.simpleName ?: "connection failed")
         } catch (e: Throwable) {
             ConnState.Failed(e.message ?: e::class.simpleName ?: "unexpected error")
+        }
+    }
+
+    // A factory board gets the first-run wizard unless it was dismissed; a board that
+    // reports a saved config clears that dismissal, so a later reflash offers it again.
+    LaunchedEffect(state) {
+        val ready = state as? ConnState.Ready ?: return@LaunchedEffect
+        when {
+            !ready.status.factory ->
+                if (currentStation.setupSkipped) StationsRepository.setSetupSkipped(station.bleId, false)
+            !currentStation.setupSkipped -> onSetup(ready.session)
         }
     }
 
@@ -163,6 +176,7 @@ fun DeviceScreen(
                     onOpenPinMap = { onOpenPinMap(s.session) },
                     onOpenLifecycle = { onOpenLifecycle(s.session) },
                     onOpenAccuracy = { onOpenAccuracy(s.session) },
+                    onOpenSoilProbe = { onOpenSoilProbe(s.session) },
                 )
             }
         }
@@ -267,6 +281,7 @@ private fun ReadyPanel(
     onOpenPinMap: () -> Unit,
     onOpenLifecycle: () -> Unit,
     onOpenAccuracy: () -> Unit,
+    onOpenSoilProbe: () -> Unit,
 ) {
     // How many readings the station currently holds (mostly mock data today).
     var readingCount by remember(session) { mutableStateOf<Long?>(null) }
@@ -302,6 +317,7 @@ private fun ReadyPanel(
             onOpenPinMap = onOpenPinMap,
             onOpenLifecycle = onOpenLifecycle,
             onOpenAccuracy = onOpenAccuracy,
+            onOpenSoilProbe = onOpenSoilProbe,
         )
     }
 
@@ -326,6 +342,7 @@ private fun TileGrid(
     onOpenPinMap: () -> Unit,
     onOpenLifecycle: () -> Unit,
     onOpenAccuracy: () -> Unit,
+    onOpenSoilProbe: () -> Unit,
 ) {
     // Two tiles per row: wider cards so titles/captions no longer truncate.
     // An odd count leaves one empty half-slot on the last row.
@@ -369,6 +386,13 @@ private fun TileGrid(
                 title = "Predicción vs real", caption = "Acierto del LSTM", icon = TerraIcons.Target,
                 onClick = onOpenAccuracy, modifier = Modifier.weight(1f),
             )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            PremiumTile(
+                title = "Sonda de suelo", caption = "Lectura en vivo", icon = TerraIcons.WaterDrop,
+                onClick = onOpenSoilProbe, modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.weight(1f))
         }
     }
 }

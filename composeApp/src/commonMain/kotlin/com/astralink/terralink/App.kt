@@ -22,6 +22,9 @@ import com.astralink.terralink.ui.PredictionsScreen
 import com.astralink.terralink.ui.ScanScreen
 import com.astralink.terralink.ui.SensorConsoleScreen
 import com.astralink.terralink.ui.SensorsScreen
+import com.astralink.terralink.ui.SoilProbeScreen
+import com.astralink.terralink.ui.SetupStep
+import com.astralink.terralink.ui.SetupWizardScreen
 import com.astralink.terralink.ui.SplashScreen
 import com.astralink.terralink.ui.StationsListScreen
 import com.astralink.terralink.ui.SyncScreen
@@ -40,7 +43,14 @@ private sealed interface Screen {
     data class Configuration(val station: SavedStation) : Screen
     data class Logs(val station: SavedStation) : Screen
     data class Lora(val station: SavedStation) : Screen
-    data class Sensors(val station: SavedStation, val openWizard: Boolean = false) : Screen
+    /** `fromSetup`: opened by the first-run wizard, which back returns to. */
+    data class Sensors(
+        val station: SavedStation,
+        val openWizard: Boolean = false,
+        val fromSetup: Boolean = false,
+    ) : Screen
+    /** First-run wizard; `step` survives the detour through Sensors. */
+    data class Setup(val station: SavedStation, val step: SetupStep = SetupStep.INTRO) : Screen
     data class SensorConsole(val station: SavedStation) : Screen
     data class Connectivity(val station: SavedStation) : Screen
     data class PinMap(val station: SavedStation) : Screen
@@ -49,6 +59,9 @@ private sealed interface Screen {
     /** Reachable from the station menu AND from inside Lifecycle, so it has to
      *  remember which one to go back to. */
     data class Accuracy(val station: SavedStation, val fromLifecycle: Boolean) : Screen
+
+    /** Live AquaCheck readings; its empty state hands off to Sensors. */
+    data class SoilProbe(val station: SavedStation) : Screen
 }
 
 @Composable
@@ -126,11 +139,36 @@ fun App() {
                     activeSession = active
                     screen = Screen.Accuracy(current.station, fromLifecycle = false)
                 },
+                onSetup = { active ->
+                    activeSession = active
+                    screen = Screen.Setup(current.station)
+                },
+                onOpenSoilProbe = { active ->
+                    activeSession = active
+                    screen = Screen.SoilProbe(current.station)
+                },
                 onBack = {
                     activeSession = null
                     screen = Screen.StationsList
                 },
             )
+
+            is Screen.Setup -> {
+                val active = activeSession
+                if (active == null) {
+                    screen = Screen.Device(current.station)
+                } else {
+                    SetupWizardScreen(
+                        station = current.station,
+                        active = active,
+                        initialStep = current.step,
+                        onAddSensors = {
+                            screen = Screen.Sensors(current.station, openWizard = true, fromSetup = true)
+                        },
+                        onDone = { screen = Screen.Device(current.station) },
+                    )
+                }
+            }
 
             is Screen.UpdateFirmware -> {
                 val active = activeSession
@@ -223,7 +261,14 @@ fun App() {
                         active = active,
                         openWizardOnStart = current.openWizard,
                         onOpenConsole = { screen = Screen.SensorConsole(current.station) },
-                        onBack = { screen = Screen.Device(current.station) },
+                        onBack = {
+                            screen = if (current.fromSetup) Screen.Setup(current.station, SetupStep.SENSORS)
+                                     else Screen.Device(current.station)
+                        },
+                        // The setup wizard asked for one sensor: show it there, in its list.
+                        onAdded = if (current.fromSetup) {
+                            { screen = Screen.Setup(current.station, SetupStep.SENSORS) }
+                        } else null,
                     )
                 }
             }
@@ -284,6 +329,20 @@ fun App() {
                             screen = if (current.fromLifecycle) Screen.Lifecycle(current.station)
                                      else Screen.Device(current.station)
                         },
+                    )
+                }
+            }
+
+            is Screen.SoilProbe -> {
+                val active = activeSession
+                if (active == null) {
+                    screen = Screen.Device(current.station)
+                } else {
+                    SoilProbeScreen(
+                        station = current.station,
+                        active = active,
+                        onOpenSensors = { screen = Screen.Sensors(current.station) },
+                        onBack = { screen = Screen.Device(current.station) },
                     )
                 }
             }

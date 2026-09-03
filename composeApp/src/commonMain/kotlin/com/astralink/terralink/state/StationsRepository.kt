@@ -76,45 +76,25 @@ object StationsRepository {
     fun find(bleId: String): SavedStation? =
         _stations.value.firstOrNull { it.bleId == bleId }
 
-    fun updateLastSync(bleId: String, ms: Long) {
-        requireInitialized()
-        ioScope.launch {
-            store.edit { prefs ->
-                val current = decode(prefs[key])
-                val updated = current.map {
-                    if (it.bleId == bleId) it.copy(lastSyncMs = ms) else it
-                }
-                prefs[key] = json.encodeToString(updated)
-            }
-        }
-    }
+    fun updateLastSync(bleId: String, ms: Long) = update(bleId) { it.copy(lastSyncMs = ms) }
 
     /** Persist the board clock snapshot read over BLE (home renders it ticking). */
-    fun updateClock(bleId: String, clockMs: Long, readAtMs: Long, offsetMin: Int) {
-        requireInitialized()
-        ioScope.launch {
-            store.edit { prefs ->
-                val current = decode(prefs[key])
-                val updated = current.map {
-                    if (it.bleId == bleId)
-                        it.copy(clockMs = clockMs, clockReadAtMs = readAtMs,
-                                clockOffsetMin = offsetMin)
-                    else it
-                }
-                prefs[key] = json.encodeToString(updated)
-            }
-        }
+    fun updateClock(bleId: String, clockMs: Long, readAtMs: Long, offsetMin: Int) = update(bleId) {
+        it.copy(clockMs = clockMs, clockReadAtMs = readAtMs, clockOffsetMin = offsetMin)
     }
 
     /** Stamp the last on-demand LoRa ping so the UI can rate-limit uplinks. */
-    fun updateLastLoraPing(bleId: String, ms: Long) {
+    fun updateLastLoraPing(bleId: String, ms: Long) = update(bleId) { it.copy(lastLoraPingMs = ms) }
+
+    /** Remember (or forget) that the first-run wizard was dismissed on a factory station. */
+    fun setSetupSkipped(bleId: String, skipped: Boolean) = update(bleId) { it.copy(setupSkipped = skipped) }
+
+    /** Rewrite one station in place; the preference flow pushes the result to [stations]. */
+    private fun update(bleId: String, transform: (SavedStation) -> SavedStation) {
         requireInitialized()
         ioScope.launch {
             store.edit { prefs ->
-                val current = decode(prefs[key])
-                val updated = current.map {
-                    if (it.bleId == bleId) it.copy(lastLoraPingMs = ms) else it
-                }
+                val updated = decode(prefs[key]).map { if (it.bleId == bleId) transform(it) else it }
                 prefs[key] = json.encodeToString(updated)
             }
         }

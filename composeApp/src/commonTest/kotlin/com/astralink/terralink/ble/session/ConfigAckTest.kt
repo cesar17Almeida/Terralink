@@ -164,4 +164,15 @@ class ConfigAckTest {
         )
         assertEquals(emptyList(), holed.notAppliedIn(holedSnapshot))
     }
+
+    // The LoRa module travels as flag + UART pair; the station's snapshot must echo all three.
+    @Test
+    fun loraPatchIsConfirmedByFlagAndPins() {
+        val on = ConfigPatchMsg(lora = true, loraTx = 16, loraRx = 17)
+        val wired = snapshot().copy(lora = true, loraTx = 16, loraRx = 17)
+        assertEquals(emptyList(), on.notAppliedIn(wired))
+        assertContains(on.notAppliedIn(snapshot().copy(lora = true, loraTx = 0, loraRx = 1)), "el pin TX de LoRa")
+        assertEquals("Aplicado ✓ · LoRa en GP16/GP17", on.appliedSummary(wired))
+        assertEquals("Aplicado ✓ · LoRa apagado", ConfigPatchMsg(lora = false).appliedSummary(snapshot()))
+    }
 }

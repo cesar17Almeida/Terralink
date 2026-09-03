@@ -1,6 +1,9 @@
 package com.astralink.terralink.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.material3.FilterChip
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,12 +31,15 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.astralink.terralink.ble.protocol.ConfigPatchMsg
+import com.astralink.terralink.ble.protocol.ConfigSnapshotMsg
 import com.astralink.terralink.ble.protocol.LoraStatus
 import com.astralink.terralink.ble.protocol.PinmapMsg
 import com.astralink.terralink.ble.protocol.StatusMsg
@@ -47,17 +53,18 @@ import com.astralink.terralink.ui.components.LoraSignalIndicator
 import com.astralink.terralink.ui.components.TerraDialog
 import com.astralink.terralink.ui.components.TerraIcons
 import com.astralink.terralink.util.formatRelativeMs
+import kotlinx.coroutines.launch
 
 private sealed class ConnPhase {
     data object Loading : ConnPhase()
-    data class Ready(val status: StatusMsg, val pinmap: PinmapMsg?) : ConnPhase()
+    data class Ready(val status: StatusMsg, val config: ConfigSnapshotMsg, val pinmap: PinmapMsg?) : ConnPhase()
     data class Failed(val message: String) : ConnPhase()
 }
 
-// One communication module in the list (Phase 1: derived from StatusMsg; a real
-// peripherals[] table comes in Phase 2). `consoleType` is null when the module
-// has no command console (e.g. a future onboard-WiFi peripheral).
-private data class Peripheral(
+// One communication module in the list (today only LoRa, from the config snapshot).
+// `lora` carries the live link when a status is at hand; `consoleType` is null
+// when the module has no command console (e.g. a future onboard-WiFi peripheral).
+internal data class Peripheral(
     val type: String,
     val name: String,
     val secondary: String,
@@ -67,8 +74,7 @@ private data class Peripheral(
 )
 
 /** Connectivity hub: one list of the station's communication modules, each row
- *  with its own console icon. A FAB adds a peripheral. The pin map lives on Home.
- *  Phase 1 derives the list from StatusMsg (today only LoRa). */
+ *  editable and removable. A FAB adds the module when there is none. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConnectivityScreen(
@@ -79,7 +85,7 @@ fun ConnectivityScreen(
 ) {
     var phase by remember { mutableStateOf<ConnPhase>(ConnPhase.Loading) }
     var reloadKey by remember { mutableStateOf(0) }
-    var showAddPeripheral by remember { mutableStateOf(false) }
+    var loraDialog by remember { mutableStateOf<LoraDialog?>(null) }
     var showLoraPing by remember { mutableStateOf(false) }
     var loraOverride by remember { mutableStateOf<LoraStatus?>(null) }
 
@@ -87,8 +93,9 @@ fun ConnectivityScreen(
         phase = ConnPhase.Loading
         phase = try {
             val status = active.readStatus()
+            val config = active.readConfig()
             val pinmap = runCatching { active.readPinmap() }.getOrNull()
-            ConnPhase.Ready(status, pinmap)
+            ConnPhase.Ready(status, config, pinmap)
         } catch (e: Throwable) {
             ConnPhase.Failed(e.message ?: "No se pudo leer la conectividad")
         }
@@ -102,8 +109,11 @@ fun ConnectivityScreen(
             )
         },
         floatingActionButton = {
-            FloatingActionButton(onClick = { showAddPeripheral = true }) {
-                Icon(TerraIcons.Add, contentDescription = "Añadir periférico")
+            val ready = phase as? ConnPhase.Ready
+            if (ready != null && !ready.config.lora) {
+                FloatingActionButton(onClick = { loraDialog = LoraDialog.EDIT }) {
+                    Icon(TerraIcons.Add, contentDescription = "Añadir módulo")
+                }
             }
         },
     ) { innerPadding ->
@@ -114,9 +124,16 @@ fun ConnectivityScreen(
                 is ConnPhase.Ready -> {
                     val effStatus = loraOverride?.let { p.status.copy(lora = it) } ?: p.status
                     ConnReadyBody(
-                        peripherals = buildPeripherals(effStatus, p.pinmap),
+                        peripherals = listOfNotNull(loraPeripheral(p.config, effStatus)),
                         onOpenConsole = { type -> if (type == "lora") onOpenLoraConsole() },
                         onSignalClick = { per -> if (per.type == "lora") showLoraPing = true },
+                        onEdit = { loraDialog = LoraDialog.EDIT },
+                        onRemove = { loraDialog = LoraDialog.REMOVE },
+                    )
+                    LoraModuleDialogs(
+                        active = active, config = p.config, freePins = p.pinmap?.freePins(),
+                        dialog = loraDialog, onClose = { loraDialog = null },
+                        onChanged = { loraOverride = null; reloadKey++ },
                     )
                     if (showLoraPing) {
                         LoraPingDialog(
@@ -132,9 +149,6 @@ fun ConnectivityScreen(
         }
     }
 
-    if (showAddPeripheral) {
-        AddPeripheralDialog(onDismiss = { showAddPeripheral = false })
-    }
 }
 
 @Composable
@@ -142,6 +156,8 @@ private fun ConnReadyBody(
     peripherals: List<Peripheral>,
     onOpenConsole: (String) -> Unit,
     onSignalClick: (Peripheral) -> Unit,
+    onEdit: (Peripheral) -> Unit,
+    onRemove: (Peripheral) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -152,8 +168,8 @@ private fun ConnReadyBody(
         if (peripherals.isEmpty()) {
             EmptyState(
                 icon = TerraIcons.Antenna,
-                title = "Sin periféricos",
-                hint = "Esta estación no reporta módulos de comunicación.",
+                title = "Sin módulos",
+                hint = "Añade el módulo LoRa con el botón +.",
             )
         } else {
             ListItemsCard(items = peripherals) { _, p ->
@@ -161,6 +177,8 @@ private fun ConnReadyBody(
                     p,
                     onConsole = { p.consoleType?.let(onOpenConsole) },
                     onSignalClick = { onSignalClick(p) },
+                    onEdit = { onEdit(p) },
+                    onRemove = { onRemove(p) },
                 )
             }
         }
@@ -168,8 +186,15 @@ private fun ConnReadyBody(
     }
 }
 
+/** One module: tapping the body opens its console (when it has one); the icons edit or remove it. */
 @Composable
-private fun PeripheralRow(p: Peripheral, onConsole: () -> Unit, onSignalClick: () -> Unit) {
+internal fun PeripheralRow(
+    p: Peripheral,
+    onConsole: () -> Unit,
+    onSignalClick: () -> Unit,
+    onEdit: () -> Unit,
+    onRemove: () -> Unit,
+) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Icon(
             p.icon, contentDescription = null,
@@ -177,7 +202,7 @@ private fun PeripheralRow(p: Peripheral, onConsole: () -> Unit, onSignalClick: (
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
+        Column(modifier = Modifier.weight(1f).clickable(enabled = p.consoleType != null, onClick = onConsole)) {
             Text(p.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
             Text(p.secondary, style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -186,32 +211,30 @@ private fun PeripheralRow(p: Peripheral, onConsole: () -> Unit, onSignalClick: (
             LoraSignalIndicator(it, Modifier.size(26.dp).clickable(onClick = onSignalClick))
             Spacer(Modifier.width(4.dp))
         }
-        if (p.consoleType != null) {
-            IconButton(onClick = onConsole) {
-                Icon(TerraIcons.Terminal, contentDescription = "Abrir consola")
-            }
+        IconButton(onClick = onEdit) {
+            Icon(TerraIcons.Edit, contentDescription = "Editar", modifier = Modifier.size(20.dp))
+        }
+        IconButton(onClick = onRemove) {
+            Icon(TerraIcons.Delete, contentDescription = "Quitar", modifier = Modifier.size(20.dp),
+                tint = MaterialTheme.colorScheme.error)
         }
     }
 }
 
-// --- Phase 1 peripheral derivation -----------------------------------------
-
-private fun buildPeripherals(status: StatusMsg, pinmap: PinmapMsg?): List<Peripheral> = buildList {
-    status.lora?.let { l ->
-        val pins = pinmap.loraPins()
-        val secondary = loraVerdict(l) +
-            if (pins.isNotEmpty()) " · " + pins.joinToString(", ") { "GP$it" } else ""
-        add(
-            Peripheral(
-                type = "lora",
-                name = l.module.ifBlank { "LoRaWAN (Wio-E5)" },
-                secondary = secondary,
-                icon = TerraIcons.Antenna,
-                lora = l,
-                consoleType = "lora",
-            ),
-        )
-    }
+/** The LoRa module as a list entry, or null when the config has it switched off.
+ *  With a [status] at hand the row also shows the live link and opens the console. */
+internal fun loraPeripheral(config: ConfigSnapshotMsg, status: StatusMsg? = null): Peripheral? {
+    if (!config.lora) return null
+    val pins = "GP${config.loraTx} · GP${config.loraRx}"
+    val link = status?.lora
+    return Peripheral(
+        type = "lora",
+        name = link?.module?.takeIf { it.isNotBlank() } ?: "LoRaWAN (Wio-E5)",
+        secondary = if (link != null) loraVerdict(link) + " · " + pins else pins,
+        icon = TerraIcons.Antenna,
+        lora = link,
+        consoleType = if (status != null) "lora" else null,
+    )
 }
 
 private fun loraVerdict(l: LoraStatus): String = when {
@@ -221,24 +244,131 @@ private fun loraVerdict(l: LoraStatus): String = when {
     else -> "Sin respuesta"
 }
 
-/** GPIOs the firmware reports as taken by the LoRa UART (reason = "lora_uart"). */
-private fun PinmapMsg?.loraPins(): List<Int> =
-    this?.pins?.filter { it.reason == "lora_uart" }?.map { it.gpio }?.sorted() ?: emptyList()
+// --- LoRa module dialogs (shared with the first-run wizard) -------------------
 
+/** Which LoRa dialog is open. EDIT also adds: the module exists once it has pins. */
+internal enum class LoraDialog { EDIT, REMOVE }
+
+/** GPIOs the LoRa module may take: free ones plus the pair it already holds. */
+internal fun PinmapMsg.freePins(): Set<Int> =
+    pins.filter { it.state == "free" || it.reason == "lora_uart" }.map { it.gpio }.toSet()
+
+/** UART (TX, RX) pairs on the Pico header; GP24/25 and GP28/29 belong to the radio and ADC. */
+private val LORA_UART_PAIRS = listOf(0 to 1, 4 to 5, 8 to 9, 12 to 13, 16 to 17, 20 to 21)
+
+/** Renders whichever LoRa dialog is open; both write the station and hand back its new snapshot. */
 @Composable
-private fun AddPeripheralDialog(onDismiss: () -> Unit) {
+internal fun LoraModuleDialogs(
+    active: ActiveSession,
+    config: ConfigSnapshotMsg,
+    freePins: Set<Int>?,
+    dialog: LoraDialog?,
+    onClose: () -> Unit,
+    onChanged: (ConfigSnapshotMsg) -> Unit,
+) {
+    when (dialog) {
+        null -> Unit
+        LoraDialog.EDIT -> LoraPinsDialog(active, config, freePins, onDismiss = onClose) { onClose(); onChanged(it) }
+        LoraDialog.REMOVE -> RemoveLoraDialog(active, config, onDismiss = onClose) { onClose(); onChanged(it) }
+    }
+}
+
+/** One config write behind a dialog's confirm button, with its busy flag and inline error. */
+@Composable
+private fun ConfigWriteDialog(
+    active: ActiveSession,
+    title: String,
+    confirmText: String,
+    confirmEnabled: Boolean,
+    destructive: Boolean = false,
+    patch: () -> ConfigPatchMsg,
+    onDismiss: () -> Unit,
+    onSaved: (ConfigSnapshotMsg) -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
     TerraDialog(
         onDismiss = onDismiss,
-        title = "Añadir periférico",
-        confirmText = "Entendido",
-        onConfirm = onDismiss,
-        dismissText = null,
+        title = title,
+        confirmText = if (busy) "Guardando…" else confirmText,
+        confirmEnabled = confirmEnabled && !busy,
+        destructive = destructive,
+        onConfirm = {
+            busy = true; error = null
+            scope.launch {
+                try { onSaved(active.writeConfig(patch())) }
+                catch (e: Throwable) { error = e.message ?: "No se pudo guardar" }
+                finally { busy = false }
+            }
+        },
     ) {
-        Text(
-            "Hoy el único periférico es el módulo LoRaWAN (Wio-E5), que se habilita y se " +
-                "conecta a sus pines TX/RX desde el firmware. Añadir y configurar periféricos " +
-                "(otro LoRa, WiFi…) desde la app llegará próximamente.",
-        )
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            content()
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        }
+    }
+}
+
+/** Add or move the module: pick the free UART pair it hangs on. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun LoraPinsDialog(
+    active: ActiveSession,
+    config: ConfigSnapshotMsg,
+    freePins: Set<Int>?,             // null = inventory unavailable, offer every pair
+    onDismiss: () -> Unit,
+    onSaved: (ConfigSnapshotMsg) -> Unit,
+) {
+    val current = config.loraTx?.let { tx -> config.loraRx?.let { rx -> tx to rx } }
+    var pair by remember { mutableStateOf(current) }
+    val pairs = LORA_UART_PAIRS.filter { freePins == null || it == current || (it.first in freePins && it.second in freePins) }
+    ConfigWriteDialog(
+        active = active,
+        title = if (config.lora) "Pines del módulo LoRa" else "Añadir módulo LoRa",
+        confirmText = "Guardar",
+        confirmEnabled = pair != null && (pair != current || !config.lora),
+        patch = { ConfigPatchMsg(lora = true, loraTx = pair!!.first, loraRx = pair!!.second) },
+        onDismiss = onDismiss,
+        onSaved = onSaved,
+    ) {
+        Text("Par UART de la estación donde está conectado el Wio-E5 (TX · RX).",
+            style = MaterialTheme.typography.bodyMedium)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            pairs.forEach { p ->
+                FilterChip(selected = p == pair, onClick = { pair = p }, label = { Text("GP${p.first} · GP${p.second}") })
+            }
+        }
+        if (pairs.isEmpty()) {
+            Text("No queda ningún par UART libre: libera pines en Periféricos.", color = MaterialTheme.colorScheme.error)
+        }
+        pair?.let {
+            Text("Cableado: TX del módulo → GP${it.second}, RX del módulo → GP${it.first}, más 3V3 y GND.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun RemoveLoraDialog(
+    active: ActiveSession,
+    config: ConfigSnapshotMsg,
+    onDismiss: () -> Unit,
+    onSaved: (ConfigSnapshotMsg) -> Unit,
+) {
+    ConfigWriteDialog(
+        active = active,
+        title = "Quitar módulo LoRa",
+        confirmText = "Quitar",
+        confirmEnabled = true,
+        destructive = true,
+        patch = { ConfigPatchMsg(lora = false) },
+        onDismiss = onDismiss,
+        onSaved = onSaved,
+    ) {
+        Text("La estación dejará de enviar datos y de recibir la hora por LoRa. " +
+            "GP${config.loraTx} y GP${config.loraRx} quedan libres para sensores.")
     }
 }
 

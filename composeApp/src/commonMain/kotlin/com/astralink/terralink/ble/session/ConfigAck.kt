@@ -95,6 +95,9 @@ internal fun ConfigPatchMsg.notAppliedIn(snapshot: ConfigSnapshotMsg): List<Stri
     check(mock, snapshot.mockEnabled, "el modo de datos simulados")
     check(logLevel, snapshot.logLevel, "el nivel de registro")
     check(loraPeriodS, snapshot.loraPeriodS, "el periodo de LoRa")
+    check(lora, snapshot.lora, "el módulo LoRa")
+    check(loraTx, snapshot.loraTx, "el pin TX de LoRa")
+    check(loraRx, snapshot.loraRx, "el pin RX de LoRa")
     check(inferenceMode, snapshot.inferenceMode, "el modo de inferencia")
     check(utcOffsetMin, snapshot.utcOffsetMin, "el desfase horario")
 
@@ -155,6 +158,9 @@ internal fun ConfigPatchMsg.appliedSummary(snapshot: ConfigSnapshotMsg): String 
     if (sleepS != null) parts += "sueño ${secondsToHuman(snapshot.sleepS)}"
     if (captureS != null) parts += "captura cada ${secondsToHuman(snapshot.captureS)}"
     if (loraPeriodS != null) parts += "LoRa cada ${secondsToHuman(snapshot.loraPeriodS)}"
+    if (lora != null || loraTx != null || loraRx != null) {
+        parts += if (snapshot.lora) "LoRa en GP${snapshot.loraTx}/GP${snapshot.loraRx}" else "LoRa apagado"
+    }
     if (lat != null && lon != null) parts += "ubicación"
     if (sensors != null) parts += "sensores"
     if (mock != null) parts += "datos simulados ${onOff(snapshot.mockEnabled)}"
