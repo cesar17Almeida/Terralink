@@ -42,7 +42,7 @@ import com.astralink.terralink.ui.components.BackIconButton
 import com.astralink.terralink.ui.components.EmptyState
 import com.astralink.terralink.ui.components.TerraIcons
 import com.astralink.terralink.ui.components.soilprobe.DepthRowModel
-import com.astralink.terralink.ui.components.soilprobe.LivePill
+import com.astralink.terralink.ui.components.soilprobe.LiveDot
 import com.astralink.terralink.ui.components.soilprobe.PROBE_PERIOD_DEFAULT_S
 import com.astralink.terralink.ui.components.soilprobe.SoilProbeCard
 import com.astralink.terralink.ui.components.soilprobe.microLabelStyle
@@ -86,7 +86,7 @@ fun SoilProbeScreen(
     var reloadKey by remember { mutableStateOf(0) }
     var probeIndex by remember { mutableStateOf(0) }
 
-    // Live state, hoisted so the app bar (subtitle + pill) can read it too.
+    // Live state, hoisted so the app bar (subtitle + live dot) can read it too.
     var sample by remember { mutableStateOf<AquaCheckSample?>(null) }
     var tick by remember { mutableStateOf(0) }
     var readPhase by remember { mutableStateOf<AquaCheckPhase?>(null) }
@@ -153,14 +153,14 @@ fun SoilProbeScreen(
     val count = current?.sensorCount ?: DEFAULT_SENSOR_COUNT
     val depths = aquaCheckDepthsCm(count)
     val subtitle = when {
-        current != null -> "$count profundidades · ${depths.first()} a ${depths.last()} cm"
         probe != null -> "SDI-12 · GP${probe.gpio} · puerto ${probe.port}"
         else -> "AquaCheck SDI-12"
     }.uppercase()
+    // Only worth a line when there is something to say; the rows speak for themselves.
     val hint = when {
         focus != null -> "${depths.getOrNull(focus) ?: 0} cm seleccionada"
         current != null && current.retries > 0 -> "${current.retries} respuestas repetidas en la última pasada"
-        else -> "Toca una profundidad"
+        else -> null
     }
 
     Scaffold(
@@ -174,7 +174,7 @@ fun SoilProbeScreen(
                 },
                 navigationIcon = { BackIconButton(onClick = onBack) },
                 actions = {
-                    if (probe != null) LivePill(live = error == null, modifier = Modifier.padding(end = 12.dp))
+                    if (probe != null) LiveDot(live = error == null, modifier = Modifier.padding(end = 12.dp))
                 },
             )
         },

@@ -52,8 +52,8 @@ fun periodLabel(s: Int, note: Boolean = false): String {
 }
 
 /**
- * The live card: a header naming the two series, the probe diagram beside one row
- * per depth, and a footer that says what the probe is doing right now.
+ * The live card: the probe diagram beside one row per depth, a footer that says
+ * what the probe is doing right now, and an (i) explaining what the numbers mean.
  */
 @Composable
 fun SoilProbeCard(
@@ -62,7 +62,7 @@ fun SoilProbeCard(
     onSelect: (Int) -> Unit,
     status: String,
     statusIsError: Boolean,
-    hint: String,
+    hint: String?,
     tick: Int,
     periodS: Int,
     onPeriodChange: (Int) -> Unit,
@@ -77,15 +77,11 @@ fun SoilProbeCard(
             .border(1.dp, cs.outlineVariant, shape),
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.End,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("HUMEDAD · SFU (0 AIRE, 100 AGUA)", style = microLabelStyle())
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Box(Modifier.size(8.dp).background(TemperatureBarColor, RoundedCornerShape(2.dp)))
-                Text("TEMP.", style = microLabelStyle())
-            }
+            MeasurementInfoButton()
         }
         HorizontalDivider(color = cs.outlineVariant.copy(alpha = 0.5f))
 
@@ -113,12 +109,14 @@ fun SoilProbeCard(
                     color = if (statusIsError) cs.error else cs.onSurfaceVariant,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
-                Text(
-                    text = hint,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = cs.outline,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                )
+                if (hint != null) {
+                    Text(
+                        text = hint,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = cs.outline,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
             Column(horizontalAlignment = Alignment.End) {
                 ReadingCounter(tick)
