@@ -1,9 +1,6 @@
 package com.astralink.terralink.ui
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.material3.FilterChip
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -48,10 +45,15 @@ import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.ui.components.BackIconButton
 import com.astralink.terralink.ui.components.EmptyState
 import com.astralink.terralink.ui.components.ListItemsCard
+import com.astralink.terralink.ui.components.LivePin
 import com.astralink.terralink.ui.components.LoraPingDialog
 import com.astralink.terralink.ui.components.LoraSignalIndicator
+import com.astralink.terralink.ui.components.LoraUartMap
+import com.astralink.terralink.ui.components.LoraUartPair
+import com.astralink.terralink.ui.components.PinLive
 import com.astralink.terralink.ui.components.TerraDialog
 import com.astralink.terralink.ui.components.TerraIcons
+import com.astralink.terralink.ui.components.livePins
 import com.astralink.terralink.util.formatRelativeMs
 import kotlinx.coroutines.launch
 
@@ -131,7 +133,7 @@ fun ConnectivityScreen(
                         onRemove = { loraDialog = LoraDialog.REMOVE },
                     )
                     LoraModuleDialogs(
-                        active = active, config = p.config, freePins = p.pinmap?.freePins(),
+                        active = active, config = p.config, pinmap = p.pinmap,
                         dialog = loraDialog, onClose = { loraDialog = null },
                         onChanged = { loraOverride = null; reloadKey++ },
                     )
@@ -249,10 +251,6 @@ private fun loraVerdict(l: LoraStatus): String = when {
 /** Which LoRa dialog is open. EDIT also adds: the module exists once it has pins. */
 internal enum class LoraDialog { EDIT, REMOVE }
 
-/** GPIOs the LoRa module may take: free ones plus the pair it already holds. */
-internal fun PinmapMsg.freePins(): Set<Int> =
-    pins.filter { it.state == "free" || it.reason == "lora_uart" }.map { it.gpio }.toSet()
-
 /** UART (TX, RX) pairs on the Pico header; GP24/25 and GP28/29 belong to the radio and ADC. */
 private val LORA_UART_PAIRS = listOf(0 to 1, 4 to 5, 8 to 9, 12 to 13, 16 to 17, 20 to 21)
 
@@ -261,16 +259,47 @@ private val LORA_UART_PAIRS = listOf(0 to 1, 4 to 5, 8 to 9, 12 to 13, 16 to 17,
 internal fun LoraModuleDialogs(
     active: ActiveSession,
     config: ConfigSnapshotMsg,
-    freePins: Set<Int>?,
+    pinmap: PinmapMsg?,
     dialog: LoraDialog?,
     onClose: () -> Unit,
     onChanged: (ConfigSnapshotMsg) -> Unit,
 ) {
     when (dialog) {
         null -> Unit
-        LoraDialog.EDIT -> LoraPinsDialog(active, config, freePins, onDismiss = onClose) { onClose(); onChanged(it) }
+        LoraDialog.EDIT -> LoraPinsDialog(active, config, pinmap, onDismiss = onClose) { onClose(); onChanged(it) }
         LoraDialog.REMOVE -> RemoveLoraDialog(active, config, onDismiss = onClose) { onClose(); onChanged(it) }
     }
+}
+
+/** Which UART block a pair belongs to (RP2040/RP2350 GPIO function table). */
+private fun uartName(tx: Int): String = if (tx == 0 || tx == 12 || tx == 16) "UART0" else "UART1"
+
+/**
+ * Why this pair is not on offer, or null when it is free. The pair already carrying
+ * the module counts as free -- it is where the module is, not an obstacle.
+ */
+private fun pairBlockedReason(
+    pair: Pair<Int, Int>,
+    current: Pair<Int, Int>?,
+    live: Map<Int, LivePin>,
+): String? {
+    if (pair == current) return null
+    for (gpio in listOf(pair.first, pair.second)) {
+        val pin = live[gpio] ?: continue
+        val why = when {
+            pin.state == PinLive.RESERVED -> when (pin.reason) {
+                "wireless" -> "lo usa la radio de la placa"
+                "wake_btn" -> "es el botón de encendido"
+                "lora_uart" -> "ya lo usa el módulo LoRa"
+                else -> "está reservado por el sistema"
+            }
+            pin.state == PinLive.IN_USE ->
+                pin.port?.let { "lo usa el sensor del puerto $it" } ?: "ya está ocupado"
+            else -> null
+        }
+        if (why != null) return "GP$gpio $why."
+    }
+    return null
 }
 
 /** One config write behind a dialog's confirm button, with its busy flag and inline error. */
@@ -311,19 +340,27 @@ private fun ConfigWriteDialog(
     }
 }
 
-/** Add or move the module: pick the free UART pair it hangs on. */
-@OptIn(ExperimentalLayoutApi::class)
+/** Add or move the module: the header's UART pairs, mapped, with the taken ones
+ *  saying who took them -- the pins are the part of this that gets miswired. */
 @Composable
 private fun LoraPinsDialog(
     active: ActiveSession,
     config: ConfigSnapshotMsg,
-    freePins: Set<Int>?,             // null = inventory unavailable, offer every pair
+    pinmap: PinmapMsg?,              // null = inventory unavailable, offer every pair
     onDismiss: () -> Unit,
     onSaved: (ConfigSnapshotMsg) -> Unit,
 ) {
     val current = config.loraTx?.let { tx -> config.loraRx?.let { rx -> tx to rx } }
     var pair by remember { mutableStateOf(current) }
-    val pairs = LORA_UART_PAIRS.filter { freePins == null || it == current || (it.first in freePins && it.second in freePins) }
+    val live = remember(pinmap) { pinmap?.livePins() ?: emptyMap() }
+    val options = remember(live, current) {
+        LORA_UART_PAIRS.map { p ->
+            LoraUartPair(
+                tx = p.first, rx = p.second, uart = uartName(p.first),
+                blocked = pairBlockedReason(p, current, live),
+            )
+        }
+    }
     ConfigWriteDialog(
         active = active,
         title = if (config.lora) "Pines del módulo LoRa" else "Añadir módulo LoRa",
@@ -333,15 +370,13 @@ private fun LoraPinsDialog(
         onDismiss = onDismiss,
         onSaved = onSaved,
     ) {
-        Text("Par UART de la estación donde está conectado el Wio-E5 (TX · RX).",
+        Text("El Wio-E5 habla por un puerto serie: elige el par de pines (TX · RX) de la " +
+            "estación donde está conectado.",
             style = MaterialTheme.typography.bodyMedium)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            pairs.forEach { p ->
-                FilterChip(selected = p == pair, onClick = { pair = p }, label = { Text("GP${p.first} · GP${p.second}") })
-            }
-        }
-        if (pairs.isEmpty()) {
-            Text("No queda ningún par UART libre: libera pines en Periféricos.", color = MaterialTheme.colorScheme.error)
+        LoraUartMap(pairs = options, selected = pair, onSelect = { pair = it.tx to it.rx })
+        if (options.all { it.blocked != null }) {
+            Text("No queda ningún par UART libre: libera pines en Periféricos.",
+                color = MaterialTheme.colorScheme.error)
         }
         pair?.let {
             Text("Cableado: TX del módulo → GP${it.second}, RX del módulo → GP${it.first}, más 3V3 y GND.",

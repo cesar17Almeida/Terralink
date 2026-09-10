@@ -5,16 +5,25 @@
 // the wire -- which is always true here, since every SDI-12 sensor gets its own GPIO.
 package com.astralink.terralink.ui.components
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -26,6 +35,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
@@ -120,66 +130,144 @@ fun Sdi12AddressField(
 
     Column(modifier.fillMaxWidth()) {
         when (val st = state) {
-            is ProbeState.Asking -> Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                Spacer(Modifier.width(12.dp))
-                // Weighted: the escape hatch is measured first and keeps its width, so
-                // a long line can never push "Escribirla" off a narrow screen.
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        "Preguntando su dirección a la sonda…",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Text(
-                        "Intento $attempt de $SDI12_PROBE_ATTEMPTS · comando ?! en GP$gpio",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                TextButton(onClick = { state = ProbeState.Manual }) { Text("Escribirla") }
-            }
-
-            is ProbeState.Found -> Column {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "Dirección detectada: ${st.address}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    TextButton(onClick = { state = ProbeState.Manual }) { Text("Cambiar") }
-                }
+            is ProbeState.Asking -> ProbeCard(ProbeScene.ASKING) {
                 Text(
-                    "La sonda respondió al comando ?! en GP$gpio.",
+                    "Preguntando su dirección a la sonda…",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "Comando ?! en GP$gpio · la sonda contesta con su dirección.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AttemptDots(attempt)
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        "Intento $attempt de $SDI12_PROBE_ATTEMPTS",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = { state = ProbeState.Manual }) { Text("Escribirla") }
+                }
             }
 
-            ProbeState.Unanswered, ProbeState.Manual -> Column {
+            is ProbeState.Found -> ProbeCard(ProbeScene.FOUND) {
+                Text(
+                    "DIRECCIÓN DETECTADA",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AddressBadge(st.address)
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        "La sonda respondió al comando ?! en GP$gpio.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = { state = ProbeState.Manual }) { Text("Cambiar") }
+                }
+            }
+
+            ProbeState.Unanswered -> Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                ProbeCard(ProbeScene.FAILED) {
+                    Text(
+                        "La sonda no contestó",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        "Tras $SDI12_PROBE_ATTEMPTS intentos en GP$gpio. Comprueba el cableado " +
+                            "(datos, 3V3 y GND), o déjala en 0, el valor de fábrica.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    FilledTonalButton(onClick = { attempt = 1; state = ProbeState.Asking }) {
+                        Text("Reintentar")
+                    }
+                }
                 AddressInput(value, onValueChange, supporting)
-                if (st is ProbeState.Unanswered) {
-                    Spacer(Modifier.height(6.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text(
-                            "La sonda no contestó tras $SDI12_PROBE_ATTEMPTS intentos. " +
-                                "Comprueba el cableado, o déjalo en 0 (valor de fábrica).",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(onClick = { attempt = 1; state = ProbeState.Asking }) {
-                            Text("Reintentar")
-                        }
+            }
+
+            ProbeState.Manual -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                AddressInput(value, onValueChange, supporting)
+                // Only worth offering when there is a live station on a chosen pin.
+                if (canProbe) {
+                    TextButton(onClick = { attempt = 1; state = ProbeState.Asking }) {
+                        Text("Detectarla automáticamente")
                     }
                 }
             }
         }
+    }
+}
+
+/** The illustration over its caption: one card for every moment of the handshake. */
+@Composable
+private fun ProbeCard(scene: ProbeScene, content: @Composable ColumnScope.() -> Unit) {
+    val found = scene == ProbeScene.FOUND
+    OutlinedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.outlinedCardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        ),
+        border = BorderStroke(
+            width = if (found) 1.5.dp else 1.dp,
+            color = if (found) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.outlineVariant,
+        ),
+    ) {
+        Sdi12ProbeAnimation(scene)
+        Column(Modifier.padding(16.dp), content = content)
+    }
+}
+
+/** One dot per attempt: filled up to the one running, so the wait has an end in sight. */
+@Composable
+private fun AttemptDots(attempt: Int) {
+    Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        repeat(SDI12_PROBE_ATTEMPTS) { i ->
+            val done = i < attempt
+            Box(
+                Modifier
+                    .size(if (done) 8.dp else 6.dp)
+                    .background(
+                        if (done) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.outlineVariant,
+                        CircleShape,
+                    ),
+            )
+        }
+    }
+}
+
+/** The address the probe gave back, as a plate: one character, monospaced. */
+@Composable
+private fun AddressBadge(address: String) {
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(12.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            address,
+            style = MaterialTheme.typography.headlineSmall,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
+        )
     }
 }
 

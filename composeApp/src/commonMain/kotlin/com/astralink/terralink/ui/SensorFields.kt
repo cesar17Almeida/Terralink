@@ -367,48 +367,6 @@ internal fun ChannelKindChips(selected: String, onPick: (String) -> Unit) {
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
-@Composable
-internal fun CadenceFields(draft: SensorDraft, onChange: (SensorDraft) -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(
-            "Cadencia propia de este sensor; en blanco sigue la global.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected = draft.followGlobal, onClick = { onChange(draft.copy(followGlobal = true)) },
-                label = { Text("Cadencia global") })
-            FilterChip(selected = !draft.followGlobal, onClick = { onChange(draft.copy(followGlobal = false)) },
-                label = { Text("Personalizada") })
-        }
-        if (!draft.followGlobal) {
-            val v = draft.intervalText.trim().toIntOrNull()
-            val valid = v != null && v in INTERVAL_MIN_S..INTERVAL_MAX_S
-            TerraTextField(
-                value = draft.intervalText,
-                onValueChange = { onChange(draft.copy(intervalText = it.filter { c -> c.isDigit() })) },
-                label = "Intervalo (segundos)",
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                isError = draft.intervalText.isNotBlank() && !valid,
-                supportingText = {
-                    if (draft.intervalText.isNotBlank() && !valid) {
-                        Text("Entre $INTERVAL_MIN_S s y $INTERVAL_MAX_S s (24 h)")
-                    } else {
-                        Text(v?.let { "= ${intervalHuman(it)}" } ?: "")
-                    }
-                },
-            )
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(60 to "1 min", 300 to "5 min", 1800 to "30 min", 3600 to "1 h").forEach { (s, l) ->
-                    FilterChip(selected = v == s, onClick = { onChange(draft.copy(intervalText = s.toString())) },
-                        label = { Text(l) })
-                }
-            }
-        }
-    }
-}
-
 internal fun intervalHuman(s: Int): String = when {
     s % 3600 == 0 && s >= 3600 -> "${s / 3600} h"
     s % 60 == 0 && s >= 60 -> "${s / 60} min"

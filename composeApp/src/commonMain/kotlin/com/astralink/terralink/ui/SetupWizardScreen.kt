@@ -242,7 +242,7 @@ fun SetupWizardScreen(
                         Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                     }
                     LoraModuleDialogs(
-                        active = active, config = p.config, freePins = p.pinmap?.freePins(),
+                        active = active, config = p.config, pinmap = p.pinmap,
                         dialog = loraDialog, onClose = { loraDialog = null },
                         onChanged = { phase = p.copy(config = it) },
                     )
@@ -328,8 +328,7 @@ private fun AddButton(label: String, onClick: () -> Unit) {
 private fun SensorsStep(sensors: List<SensorInfo>, onAdd: () -> Unit) {
     Body("Añade los sensores conectados a la estación: cada uno ocupa un pin libre y hay sitio para seis. " +
         "También puedes hacerlo más tarde desde Periféricos.")
-    if (sensors.isEmpty()) Hint("Todavía no hay sensores.")
-    sensors.forEach { Hint("${sensorTypeLabel(it.type)} · GPIO ${it.gpio} · puerto ${it.port}") }
+    if (sensors.isEmpty()) Hint("Todavía no hay sensores.") else SensorSummaryList(sensors)
     AddButton("Añadir sensor", onAdd)
 }
 

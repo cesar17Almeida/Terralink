@@ -151,11 +151,8 @@ fun SensorEditScreen(
 
             MappingFields(draft) { draft = it }
 
-            if (!output) {
-                EditSection("Cadencia de muestreo") {
-                    CadenceFields(draft) { draft = it }
-                }
-            }
+            // No section header here: CadenceFields leads with its own titled explainer.
+            if (!output) CadenceFields(draft) { draft = it }
 
             // The draft is invalid on its own (a blank required field), so say so here
             // rather than leaving Guardar greyed out with no explanation.

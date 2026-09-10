@@ -74,7 +74,7 @@ private val ALT_FN = mapOf(
     14 to "I2C1 SDA · SPI1 SCK", 15 to "I2C1 SCL · SPI1 TX",
     16 to "UART0 TX · I2C0 SDA", 17 to "UART0 RX · I2C0 SCL",
     18 to "I2C1 SDA · SPI0 SCK", 19 to "I2C1 SCL · SPI0 TX",
-    20 to "I2C0 SDA · SPI0 RX", 21 to "I2C0 SCL · SPI0 CSn",
+    20 to "UART1 TX · I2C0 SDA", 21 to "UART1 RX · I2C0 SCL",
     22 to "I2C1 SDA · SPI0 SCK",
     26 to "ADC0 · I2C1 SDA", 27 to "ADC1 · I2C1 SCL", 28 to "ADC2 · SPI1 RX",
 )
