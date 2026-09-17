@@ -73,6 +73,8 @@ internal class AndroidGattCallback : BluetoothGattCallback() {
                 pendingWrite = null
                 pendingDescriptorWrite?.takeIf { it.isActive }?.resumeWithException(err)
                 pendingDescriptorWrite = null
+                // Release the client interface: leaked ones end in status 133 on later connects.
+                runCatching { g.close() }
             }
         }
     }

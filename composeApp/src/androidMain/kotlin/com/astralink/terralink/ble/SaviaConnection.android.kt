@@ -8,15 +8,28 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
 import android.os.Build
+import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 import kotlin.coroutines.resumeWithException
 
 // Standard Client Characteristic Configuration Descriptor UUID.
 private val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+// Longest wait for one GATT callback; a silently dropped link would otherwise hang the caller.
+private const val GATT_OP_TIMEOUT_MS = 10_000L
 
 @SuppressLint("MissingPermission")
 actual class SaviaConnection internal constructor(
@@ -27,6 +40,9 @@ actual class SaviaConnection internal constructor(
 
     // Serializes GATT operations: Android allows at most one read/write in flight.
     private val gattMutex = Mutex()
+
+    // Runs the queued CCCD writes; cancelled on disconnect.
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     companion object {
         suspend fun connect(ctx: Context, device: BluetoothDevice): SaviaConnection =
@@ -52,13 +68,9 @@ actual class SaviaConnection internal constructor(
 
     actual suspend fun read(characteristicUuid: String): ByteArray = gattMutex.withLock {
         val char = findCharacteristic(characteristicUuid)
-        suspendCancellableCoroutine { cont ->
+        awaitGatt<ByteArray>("read $characteristicUuid", clear = { callback.pendingRead = null }) { cont ->
             callback.pendingRead = cont
-            val ok = gatt.readCharacteristic(char)
-            if (!ok) {
-                callback.pendingRead = null
-                cont.resumeWithException(BleError.IoError("readCharacteristic returned false"))
-            }
+            if (gatt.readCharacteristic(char)) null else "readCharacteristic returned false"
         }
     }
 
@@ -68,9 +80,9 @@ actual class SaviaConnection internal constructor(
         val char = findCharacteristic(characteristicUuid)
         val writeType = if (withResponse) BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
                         else BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-        suspendCancellableCoroutine<Unit> { cont ->
+        awaitGatt<Unit>("write $characteristicUuid", clear = { callback.pendingWrite = null }) { cont ->
             callback.pendingWrite = cont
-            val failure: String? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val rc = gatt.writeCharacteristic(char, value, writeType)
                 if (rc == BluetoothStatusCodes.SUCCESS) null else "writeCharacteristic rc=$rc"
             } else {
@@ -80,37 +92,59 @@ actual class SaviaConnection internal constructor(
                     if (gatt.writeCharacteristic(char)) null else "writeCharacteristic returned false"
                 }
             }
-            if (failure != null) {
-                callback.pendingWrite = null
-                cont.resumeWithException(BleError.IoError(failure))
-            }
         }
     }
 
     actual fun notifications(characteristicUuid: String): Flow<ByteArray> {
         val char = findCharacteristic(characteristicUuid)
-        // The Flow itself is hot/shared in the callback. Enable is side-effect-only
-        // here (the contract keeps notifications() non-suspend so ActiveSession can
-        // bind it from a property initializer), but a failed/absent CCCD write must
-        // surface now -- otherwise the subscribe silently never enables.
+        // Non-suspend by contract (ActiveSession binds it from property initializers).
         if (!gatt.setCharacteristicNotification(char, true)) {
             throw BleError.IoError("setCharacteristicNotification($characteristicUuid) returned false")
         }
         val cccd = char.getDescriptor(CCCD_UUID)
             ?: throw BleError.IoError("characteristic $characteristicUuid has no CCCD descriptor")
-        val enable = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-        val failure: String? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val rc = gatt.writeDescriptor(cccd, enable)
-            if (rc == BluetoothStatusCodes.SUCCESS) null else "writeDescriptor rc=$rc"
-        } else {
-            @Suppress("DEPRECATION") run {
-                cccd.value = enable
-                if (gatt.writeDescriptor(cccd)) null else "writeDescriptor returned false"
+        // The CCCD write is a GATT operation too: two back to back are refused as busy,
+        // so it queues on the same mutex (UNDISPATCHED takes its FIFO place right now).
+        val enabled = scope.async(start = CoroutineStart.UNDISPATCHED) {
+            gattMutex.withLock { writeCccd(characteristicUuid, cccd) }
+        }
+        val notes = callback.notificationFlow(characteristicUuid)
+        return channelFlow {
+            launch { enabled.await() }      // a refused enable fails the collector
+            notes.collect { send(it) }
+        }
+    }
+
+    private suspend fun writeCccd(uuid: String, cccd: BluetoothGattDescriptor) =
+        awaitGatt<Unit>("enable notify $uuid", clear = { callback.pendingDescriptorWrite = null }) { cont ->
+            callback.pendingDescriptorWrite = cont
+            val enable = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val rc = gatt.writeDescriptor(cccd, enable)
+                if (rc == BluetoothStatusCodes.SUCCESS) null else "writeDescriptor rc=$rc"
+            } else {
+                @Suppress("DEPRECATION") run {
+                    cccd.value = enable
+                    if (gatt.writeDescriptor(cccd)) null else "writeDescriptor returned false"
+                }
             }
         }
-        if (failure != null) throw BleError.IoError("enable notify $characteristicUuid: $failure")
-        return callback.notificationFlow(characteristicUuid)
-    }
+
+    /** Start one GATT operation and wait for its callback; [start] returns an error text if refused. */
+    private suspend fun <T : Any> awaitGatt(
+        what: String,
+        clear: () -> Unit,
+        start: (CancellableContinuation<T>) -> String?,
+    ): T = withTimeoutOrNull(GATT_OP_TIMEOUT_MS) {
+        suspendCancellableCoroutine<T> { cont ->
+            cont.invokeOnCancellation { clear() }
+            val failure = start(cont)
+            if (failure != null) {
+                clear()
+                cont.resumeWithException(BleError.IoError(failure))
+            }
+        }
+    } ?: throw BleError.Timeout("$what: no answer from the station")
 
     actual suspend fun openL2cap(psm: Int): L2capChannel {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
@@ -133,6 +167,7 @@ actual class SaviaConnection internal constructor(
     }
 
     actual suspend fun disconnect() {
+        scope.cancel()
         runCatching { gatt.disconnect() }
         runCatching { gatt.close() }
     }
