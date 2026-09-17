@@ -8,44 +8,51 @@ import android.location.LocationManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 
+/** Holds the caller waiting on the permission prompt (no recomposition needed). */
+private class PendingLocation {
+    var callback: ((GeoCoords?) -> Unit)? = null
+}
+
+private val LOCATION_PERMISSIONS = arrayOf(
+    Manifest.permission.ACCESS_FINE_LOCATION,
+    Manifest.permission.ACCESS_COARSE_LOCATION,
+)
+
 /**
- * Android LocationRequester: last-known fix via the framework LocationManager (no new
- * dependency, no Google Play Services). Requests ACCESS_FINE_LOCATION at runtime the
- * first time; a denial delivers null.
+ * Android LocationRequester: last-known fix via LocationManager (no Play Services). Asks for
+ * fine + coarse together, as Android 12+ ignores a lone fine request; a denial delivers null.
  */
 @Composable
 actual fun rememberLocationRequester(): LocationRequester? {
     val context = LocalContext.current
-    var pending by remember { mutableStateOf<((GeoCoords?) -> Unit)?>(null) }
+    val pending = remember { PendingLocation() }
     val launcher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        val cb = pending
-        pending = null
-        cb?.invoke(if (granted) lastKnownCoords(context) else null)
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grants ->
+        val cb = pending.callback
+        pending.callback = null
+        cb?.invoke(if (grants.values.any { it }) lastKnownCoords(context) else null)
     }
     return remember(context) {
         object : LocationRequester {
             override fun request(onResult: (GeoCoords?) -> Unit) {
-                if (hasFineLocation(context)) {
+                if (hasAnyLocation(context)) {
                     onResult(lastKnownCoords(context))
                 } else {
-                    pending = onResult
-                    launcher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                    pending.callback = onResult
+                    launcher.launch(LOCATION_PERMISSIONS)
                 }
             }
         }
     }
 }
 
-private fun hasFineLocation(ctx: Context): Boolean =
-    ctx.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+private fun hasAnyLocation(ctx: Context): Boolean = LOCATION_PERMISSIONS.any {
+    ctx.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
+}
 
 // Newest last-known fix across the enabled providers. Returns null with no cached fix.
 private fun lastKnownCoords(ctx: Context): GeoCoords? {

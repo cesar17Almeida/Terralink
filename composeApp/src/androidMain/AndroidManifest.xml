@@ -17,8 +17,9 @@
 
     <!-- Location, on all API levels: pre-12 it also enables BLE scanning; everywhere it
          backs the "Usar mi ubicación" button that fills the station's lat/lon from the
-         device GPS. Requested at runtime on demand. -->
+         device GPS. Requested at runtime on demand; Android 12+ needs COARSE with FINE. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <application
         android:allowBackup="true"

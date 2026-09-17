@@ -1,5 +1,6 @@
 package com.astralink.terralink.ble
 
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
@@ -22,6 +23,8 @@ import kotlin.coroutines.resumeWithException
  * GATT operations (read/write) on its side so there is at most one pending
  * `*Read` / `*Write` continuation at a time.
  */
+// Only reached on connections opened with BLUETOOTH_CONNECT granted, like BleClient.
+@SuppressLint("MissingPermission")
 internal class AndroidGattCallback : BluetoothGattCallback() {
 
     companion object {
