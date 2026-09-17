@@ -44,11 +44,30 @@ import com.astralink.terralink.ui.components.BackIconButton
 import com.astralink.terralink.ui.components.TerraIcons
 import com.astralink.terralink.ui.components.TerraTextField
 import com.astralink.terralink.ui.components.dismissKeyboardOnTap
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import kotlinx.coroutines.launch
 
 private data class AtBubble(val tsMs: Long, val fromUser: Boolean, val text: String, val isError: Boolean = false)
 
 private val QUICK_CMDS = listOf("AT", "AT+VER", "AT+ID", "AT+MODE=LWOTAA", "AT+DR=EU868", "AT+JOIN")
+
+/** Longest command the station relays (SAVIA_AT_CMD_MAX - 1 in savia_c). */
+private const val AT_CMD_MAX_CHARS = 63
+
+/** Phone keyboards swap straight quotes and hyphens for typographic ones ("smart
+ *  punctuation"); the Wio-E5 answers ERROR(-24) to those bytes. Map them back. */
+private fun asciiAt(raw: String): String = buildString(raw.length) {
+    for (ch in raw.trim()) append(
+        when (ch) {
+            '\u201C', '\u201D', '\u201E', '\u201F', '\u2033', '\u00AB', '\u00BB' -> '"'
+            '\u2018', '\u2019', '\u201A', '\u201B', '\u2032' -> '\''
+            '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2212' -> '-'
+            '\u00A0' -> ' '
+            else -> ch
+        },
+    )
+}
 
 /** Chat-style raw AT terminal: the phone sends a command over BLE, the Pico relays
  *  it to the Wio-E5 over UART and returns the reply lines, shown as chat bubbles. */
@@ -82,9 +101,21 @@ fun LoraConsoleScreen(
     }
 
     fun send(cmd: String) {
-        val c = cmd.trim()
+        val c = asciiAt(cmd)
         if (c.isEmpty() || sending) return
         log(AtBubble(nowEpochMs(), fromUser = true, text = c))
+        // The module only speaks printable ASCII: name the character it would refuse
+        // instead of relaying it and getting a bare ERROR(-24) back. The input stays
+        // put so it can be fixed.
+        val refused = when {
+            c.length > AT_CMD_MAX_CHARS -> "Comando demasiado largo: máximo $AT_CMD_MAX_CHARS caracteres."
+            else -> c.firstOrNull { it.code !in 0x20..0x7E }
+                ?.let { "Carácter no ASCII «$it»: el módulo lo rechaza. Revisa comillas y guiones." }
+        }
+        if (refused != null) {
+            log(AtBubble(nowEpochMs(), fromUser = false, text = refused, isError = true))
+            return
+        }
         input = ""
         sending = true
         scope.launch {
@@ -169,6 +200,9 @@ fun LoraConsoleScreen(
                     label = "Comando AT",
                     enabled = !sending,
                     modifier = Modifier.weight(1f),
+                    // ASCII keyboard, no autocorrect: keeps smart punctuation off the
+                    // command where the platform honours it; asciiAt covers the rest.
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
                 )
                 IconButton(onClick = { send(input) }, enabled = !sending && input.isNotBlank()) {
                     Icon(

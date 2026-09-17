@@ -166,7 +166,7 @@ class ActiveSession internal constructor(
     @OptIn(ExperimentalSerializationApi::class)
     suspend fun atCommand(cmd: String): AtResultMsg {
         val beforeSeq = runCatching { atRoundtrip(cmd) }.getOrNull()?.seq ?: -1
-        repeat(22) {                                   // ~15 s (covers slow AT like JOIN)
+        repeat(26) {                                   // ~18 s: the station caps a JOIN/uplink capture at 13 s
             delay(700)
             val r = runCatching { atRoundtrip(null) }.getOrNull()
             if (r != null && r.seq != beforeSeq) return r
