@@ -102,14 +102,15 @@ private const val DIM_ALPHA = 0.15f
 
 /**
  * @param cells the merged header (see [mergePinmap]).
- * @param selected physical pin number currently open in the detail bar.
+ * @param selected physical pin numbers drawn as chosen: the one open in the detail
+ *        bar, or both pins of a UART pair in the LoRa picker.
  * @param isVisible false dims the pin instead of hiding it, so the board keeps
  *        its shape while a filter is on.
  */
 @Composable
 fun PinHeaderList(
     cells: List<PinCell>,
-    selected: Int?,
+    selected: Set<Int>,
     onSelect: (PinCell) -> Unit,
     modifier: Modifier = Modifier,
     rowHeight: Dp = 44.dp,
@@ -181,7 +182,7 @@ private fun PinRow(
     right: PinCell,
     rowHeight: Dp,
     showFunctions: Boolean,
-    selected: Int?,
+    selected: Set<Int>,
     onSelect: (PinCell) -> Unit,
     isVisible: (PinCell) -> Boolean,
     mode: PinListMode,
@@ -193,7 +194,7 @@ private fun PinRow(
     ) {
         PinLabel(
             cell = left, alignEnd = true, dim = !isVisible(left),
-            isSelected = selected == left.physical, showFunctions = showFunctions,
+            isSelected = left.physical in selected, showFunctions = showFunctions,
             mode = mode, tones = tones, onClick = { onSelect(left) },
             modifier = Modifier.weight(1f),
         )
@@ -202,12 +203,12 @@ private fun PinRow(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            PinDot(left, selected == left.physical, !isVisible(left), mode, tones) { onSelect(left) }
-            PinDot(right, selected == right.physical, !isVisible(right), mode, tones) { onSelect(right) }
+            PinDot(left, left.physical in selected, !isVisible(left), mode, tones) { onSelect(left) }
+            PinDot(right, right.physical in selected, !isVisible(right), mode, tones) { onSelect(right) }
         }
         PinLabel(
             cell = right, alignEnd = false, dim = !isVisible(right),
-            isSelected = selected == right.physical, showFunctions = showFunctions,
+            isSelected = right.physical in selected, showFunctions = showFunctions,
             mode = mode, tones = tones, onClick = { onSelect(right) },
             modifier = Modifier.weight(1f),
         )

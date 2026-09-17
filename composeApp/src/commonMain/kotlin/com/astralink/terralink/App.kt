@@ -17,6 +17,7 @@ import com.astralink.terralink.ui.DeviceScreen
 import com.astralink.terralink.ui.LifecycleScreen
 import com.astralink.terralink.ui.LogsScreen
 import com.astralink.terralink.ui.LoraConsoleScreen
+import com.astralink.terralink.ui.LoraPinsScreen
 import com.astralink.terralink.ui.PinMapScreen
 import com.astralink.terralink.ui.PredictionsScreen
 import com.astralink.terralink.ui.ScanScreen
@@ -53,6 +54,8 @@ private sealed interface Screen {
     data class Setup(val station: SavedStation, val step: SetupStep = SetupStep.INTRO) : Screen
     data class SensorConsole(val station: SavedStation) : Screen
     data class Connectivity(val station: SavedStation) : Screen
+    /** Placing or moving the LoRa module on the board; hands back to Connectivity. */
+    data class LoraPins(val station: SavedStation) : Screen
     data class PinMap(val station: SavedStation) : Screen
     data class Lifecycle(val station: SavedStation) : Screen
 
@@ -296,7 +299,20 @@ fun App() {
                         station = current.station,
                         active = active,
                         onOpenLoraConsole = { screen = Screen.Lora(current.station) },
+                        onEditLoraPins = { screen = Screen.LoraPins(current.station) },
                         onBack = { screen = Screen.Device(current.station) },
+                    )
+                }
+            }
+
+            is Screen.LoraPins -> {
+                val active = activeSession
+                if (active == null) {
+                    screen = Screen.Device(current.station)
+                } else {
+                    LoraPinsScreen(
+                        active = active,
+                        onBack = { screen = Screen.Connectivity(current.station) },
                     )
                 }
             }

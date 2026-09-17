@@ -38,28 +38,22 @@ import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.protocol.ConfigPatchMsg
 import com.astralink.terralink.ble.protocol.ConfigSnapshotMsg
 import com.astralink.terralink.ble.protocol.LoraStatus
-import com.astralink.terralink.ble.protocol.PinmapMsg
 import com.astralink.terralink.ble.protocol.StatusMsg
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.ui.components.BackIconButton
 import com.astralink.terralink.ui.components.EmptyState
 import com.astralink.terralink.ui.components.ListItemsCard
-import com.astralink.terralink.ui.components.LivePin
 import com.astralink.terralink.ui.components.LoraPingDialog
 import com.astralink.terralink.ui.components.LoraSignalIndicator
-import com.astralink.terralink.ui.components.LoraUartMap
-import com.astralink.terralink.ui.components.LoraUartPair
-import com.astralink.terralink.ui.components.PinLive
 import com.astralink.terralink.ui.components.TerraDialog
 import com.astralink.terralink.ui.components.TerraIcons
-import com.astralink.terralink.ui.components.livePins
 import com.astralink.terralink.util.formatRelativeMs
 import kotlinx.coroutines.launch
 
 private sealed class ConnPhase {
     data object Loading : ConnPhase()
-    data class Ready(val status: StatusMsg, val config: ConfigSnapshotMsg, val pinmap: PinmapMsg?) : ConnPhase()
+    data class Ready(val status: StatusMsg, val config: ConfigSnapshotMsg) : ConnPhase()
     data class Failed(val message: String) : ConnPhase()
 }
 
@@ -76,28 +70,27 @@ internal data class Peripheral(
 )
 
 /** Connectivity hub: one list of the station's communication modules, each row
- *  editable and removable. A FAB adds the module when there is none. */
+ *  editable and removable. Adding (the FAB, shown while there is none) and editing
+ *  both open [LoraPinsScreen]; removing confirms in place. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConnectivityScreen(
     station: SavedStation,
     active: ActiveSession,
     onOpenLoraConsole: () -> Unit,
+    onEditLoraPins: () -> Unit,
     onBack: () -> Unit,
 ) {
     var phase by remember { mutableStateOf<ConnPhase>(ConnPhase.Loading) }
     var reloadKey by remember { mutableStateOf(0) }
-    var loraDialog by remember { mutableStateOf<LoraDialog?>(null) }
+    var confirmRemove by remember { mutableStateOf(false) }
     var showLoraPing by remember { mutableStateOf(false) }
     var loraOverride by remember { mutableStateOf<LoraStatus?>(null) }
 
     LaunchedEffect(reloadKey) {
         phase = ConnPhase.Loading
         phase = try {
-            val status = active.readStatus()
-            val config = active.readConfig()
-            val pinmap = runCatching { active.readPinmap() }.getOrNull()
-            ConnPhase.Ready(status, config, pinmap)
+            ConnPhase.Ready(active.readStatus(), active.readConfig())
         } catch (e: Throwable) {
             ConnPhase.Failed(e.message ?: "No se pudo leer la conectividad")
         }
@@ -113,7 +106,7 @@ fun ConnectivityScreen(
         floatingActionButton = {
             val ready = phase as? ConnPhase.Ready
             if (ready != null && !ready.config.lora) {
-                FloatingActionButton(onClick = { loraDialog = LoraDialog.EDIT }) {
+                FloatingActionButton(onClick = onEditLoraPins) {
                     Icon(TerraIcons.Add, contentDescription = "Añadir módulo")
                 }
             }
@@ -129,13 +122,13 @@ fun ConnectivityScreen(
                         peripherals = listOfNotNull(loraPeripheral(p.config, effStatus)),
                         onOpenConsole = { type -> if (type == "lora") onOpenLoraConsole() },
                         onSignalClick = { per -> if (per.type == "lora") showLoraPing = true },
-                        onEdit = { loraDialog = LoraDialog.EDIT },
-                        onRemove = { loraDialog = LoraDialog.REMOVE },
+                        onEdit = { onEditLoraPins() },
+                        onRemove = { confirmRemove = true },
                     )
-                    LoraModuleDialogs(
-                        active = active, config = p.config, pinmap = p.pinmap,
-                        dialog = loraDialog, onClose = { loraDialog = null },
-                        onChanged = { loraOverride = null; reloadKey++ },
+                    if (confirmRemove) RemoveLoraDialog(
+                        active = active, config = p.config,
+                        onDismiss = { confirmRemove = false },
+                        onSaved = { confirmRemove = false; loraOverride = null; reloadKey++ },
                     )
                     if (showLoraPing) {
                         LoraPingDialog(
@@ -246,61 +239,7 @@ private fun loraVerdict(l: LoraStatus): String = when {
     else -> "Sin respuesta"
 }
 
-// --- LoRa module dialogs (shared with the first-run wizard) -------------------
-
-/** Which LoRa dialog is open. EDIT also adds: the module exists once it has pins. */
-internal enum class LoraDialog { EDIT, REMOVE }
-
-/** UART (TX, RX) pairs on the Pico header; GP24/25 and GP28/29 belong to the radio and ADC. */
-private val LORA_UART_PAIRS = listOf(0 to 1, 4 to 5, 8 to 9, 12 to 13, 16 to 17, 20 to 21)
-
-/** Renders whichever LoRa dialog is open; both write the station and hand back its new snapshot. */
-@Composable
-internal fun LoraModuleDialogs(
-    active: ActiveSession,
-    config: ConfigSnapshotMsg,
-    pinmap: PinmapMsg?,
-    dialog: LoraDialog?,
-    onClose: () -> Unit,
-    onChanged: (ConfigSnapshotMsg) -> Unit,
-) {
-    when (dialog) {
-        null -> Unit
-        LoraDialog.EDIT -> LoraPinsDialog(active, config, pinmap, onDismiss = onClose) { onClose(); onChanged(it) }
-        LoraDialog.REMOVE -> RemoveLoraDialog(active, config, onDismiss = onClose) { onClose(); onChanged(it) }
-    }
-}
-
-/** Which UART block a pair belongs to (RP2040/RP2350 GPIO function table). */
-private fun uartName(tx: Int): String = if (tx == 0 || tx == 12 || tx == 16) "UART0" else "UART1"
-
-/**
- * Why this pair is not on offer, or null when it is free. The pair already carrying
- * the module counts as free -- it is where the module is, not an obstacle.
- */
-private fun pairBlockedReason(
-    pair: Pair<Int, Int>,
-    current: Pair<Int, Int>?,
-    live: Map<Int, LivePin>,
-): String? {
-    if (pair == current) return null
-    for (gpio in listOf(pair.first, pair.second)) {
-        val pin = live[gpio] ?: continue
-        val why = when {
-            pin.state == PinLive.RESERVED -> when (pin.reason) {
-                "wireless" -> "lo usa la radio de la placa"
-                "wake_btn" -> "es el botón de encendido"
-                "lora_uart" -> "ya lo usa el módulo LoRa"
-                else -> "está reservado por el sistema"
-            }
-            pin.state == PinLive.IN_USE ->
-                pin.port?.let { "lo usa el sensor del puerto $it" } ?: "ya está ocupado"
-            else -> null
-        }
-        if (why != null) return "GP$gpio $why."
-    }
-    return null
-}
+// --- Removing the module (its pins are placed on LoraPinsScreen) ----------------
 
 /** One config write behind a dialog's confirm button, with its busy flag and inline error. */
 @Composable
@@ -340,53 +279,8 @@ private fun ConfigWriteDialog(
     }
 }
 
-/** Add or move the module: the header's UART pairs, mapped, with the taken ones
- *  saying who took them -- the pins are the part of this that gets miswired. */
 @Composable
-private fun LoraPinsDialog(
-    active: ActiveSession,
-    config: ConfigSnapshotMsg,
-    pinmap: PinmapMsg?,              // null = inventory unavailable, offer every pair
-    onDismiss: () -> Unit,
-    onSaved: (ConfigSnapshotMsg) -> Unit,
-) {
-    val current = config.loraTx?.let { tx -> config.loraRx?.let { rx -> tx to rx } }
-    var pair by remember { mutableStateOf(current) }
-    val live = remember(pinmap) { pinmap?.livePins() ?: emptyMap() }
-    val options = remember(live, current) {
-        LORA_UART_PAIRS.map { p ->
-            LoraUartPair(
-                tx = p.first, rx = p.second, uart = uartName(p.first),
-                blocked = pairBlockedReason(p, current, live),
-            )
-        }
-    }
-    ConfigWriteDialog(
-        active = active,
-        title = if (config.lora) "Pines del módulo LoRa" else "Añadir módulo LoRa",
-        confirmText = "Guardar",
-        confirmEnabled = pair != null && (pair != current || !config.lora),
-        patch = { ConfigPatchMsg(lora = true, loraTx = pair!!.first, loraRx = pair!!.second) },
-        onDismiss = onDismiss,
-        onSaved = onSaved,
-    ) {
-        Text("El Wio-E5 habla por un puerto serie: elige el par de pines (TX · RX) de la " +
-            "estación donde está conectado.",
-            style = MaterialTheme.typography.bodyMedium)
-        LoraUartMap(pairs = options, selected = pair, onSelect = { pair = it.tx to it.rx })
-        if (options.all { it.blocked != null }) {
-            Text("No queda ningún par UART libre: libera pines en Periféricos.",
-                color = MaterialTheme.colorScheme.error)
-        }
-        pair?.let {
-            Text("Cableado: TX del módulo → GP${it.second}, RX del módulo → GP${it.first}, más 3V3 y GND.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-@Composable
-private fun RemoveLoraDialog(
+internal fun RemoveLoraDialog(
     active: ActiveSession,
     config: ConfigSnapshotMsg,
     onDismiss: () -> Unit,

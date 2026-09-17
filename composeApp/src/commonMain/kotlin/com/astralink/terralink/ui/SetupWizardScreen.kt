@@ -29,6 +29,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -54,7 +55,6 @@ import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.state.StationsRepository
 import com.astralink.terralink.ui.components.BackIconButton
-import com.astralink.terralink.ui.components.ListItemsCard
 import com.astralink.terralink.ui.components.PasswordField
 import com.astralink.terralink.ui.components.TerraIcons
 import com.astralink.terralink.ui.components.dismissKeyboardOnTap
@@ -75,9 +75,9 @@ private sealed class SetupPhase {
 
 /**
  * First-run setup for a station that reports factory defaults: sensors, LoRa
- * module, password and model, one screen each. Sensors and the module are added
- * through their own dialogs, which write at once; password and model write on
- * "next", so a refused write is shown where it happened. Leaving by any door
+ * module, password and model, one screen each. Sensors are added through their
+ * own screen, which writes at once; the module's pins, password and model write
+ * on "next", so a refused write is shown where it happened. Leaving by any door
  * dismisses the wizard until the station stops reporting factory defaults.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -98,7 +98,7 @@ fun SetupWizardScreen(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var reloadKey by remember { mutableStateOf(0) }
-    var loraDialog by remember { mutableStateOf<LoraDialog?>(null) }
+    var removeLora by remember { mutableStateOf(false) }
 
     LaunchedEffect(reloadKey) {
         phase = SetupPhase.Loading
@@ -113,13 +113,26 @@ fun SetupWizardScreen(
         }
     }
 
-    // Drafts re-seed from the station's confirmed config after every write.
+    // Drafts re-seed from the station's confirmed value of their own field after
+    // every write, so saving one step never resets what another step still holds.
     val cfg = (phase as? SetupPhase.Ready)?.config
+    val currentLora = cfg?.let(::configuredLoraPair)
     var password by remember { mutableStateOf("") }
     var confirm by remember { mutableStateOf("") }
-    var mode by remember(cfg) { mutableStateOf(cfg?.inferenceMode ?: "forward") }
-    var hour by remember(cfg) { mutableStateOf(cfg?.dailyHour ?: 20) }
-    var minute by remember(cfg) { mutableStateOf(cfg?.dailyMin ?: 0) }
+    var loraPair by remember(currentLora) { mutableStateOf(currentLora) }
+    var mode by remember(cfg?.inferenceMode) { mutableStateOf(cfg?.inferenceMode ?: "forward") }
+    var hour by remember(cfg?.dailyHour) { mutableStateOf(cfg?.dailyHour ?: 20) }
+    var minute by remember(cfg?.dailyMin) { mutableStateOf(cfg?.dailyMin ?: 0) }
+
+    /** Adopt the station's new snapshot, then refresh the pin inventory it just changed. */
+    fun adopt(config: ConfigSnapshotMsg) {
+        val ready = phase as? SetupPhase.Ready ?: return
+        phase = ready.copy(config = config)
+        scope.launch {
+            val pinmap = runCatching { active.readPinmap() }.getOrNull() ?: return@launch
+            (phase as? SetupPhase.Ready)?.let { phase = it.copy(pinmap = pinmap) }
+        }
+    }
 
     fun leave() { StationsRepository.setSetupSkipped(station.bleId, true); onDone() }
     fun back() { if (step == SetupStep.INTRO) leave() else step = SetupStep.entries[step.ordinal - 1] }
@@ -150,6 +163,13 @@ fun SetupWizardScreen(
         val ready = phase as? SetupPhase.Ready ?: return
         val c = ready.config
         when (step) {
+            SetupStep.LORA -> {
+                val pair = loraPair
+                if (pair == null || pair == currentLora) advance()
+                else commit {
+                    adopt(active.writeConfig(ConfigPatchMsg(lora = true, loraTx = pair.first, loraRx = pair.second)))
+                }
+            }
             SetupStep.PASSWORD ->
                 if (password.isEmpty() || ready.prov) advance()
                 else commit { active.setPassword(password); phase = ready.copy(prov = true) }
@@ -222,10 +242,8 @@ fun SetupWizardScreen(
                         )
                         SetupStep.SENSORS -> SensorsStep(p.config.sensors, onAdd = onAddSensors)
                         SetupStep.LORA -> LoraStep(
-                            module = loraPeripheral(p.config),
-                            onAdd = { loraDialog = LoraDialog.EDIT },
-                            onEdit = { loraDialog = LoraDialog.EDIT },
-                            onRemove = { loraDialog = LoraDialog.REMOVE },
+                            config = p.config, pinmap = p.pinmap, selected = loraPair,
+                            onSelect = { loraPair = it }, onRemove = { removeLora = true },
                         )
                         SetupStep.PASSWORD -> PasswordStep(
                             prov = p.prov, password = password, confirm = confirm,
@@ -241,10 +259,10 @@ fun SetupWizardScreen(
                     error?.let {
                         Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                     }
-                    LoraModuleDialogs(
-                        active = active, config = p.config, pinmap = p.pinmap,
-                        dialog = loraDialog, onClose = { loraDialog = null },
-                        onChanged = { phase = p.copy(config = it) },
+                    if (removeLora) RemoveLoraDialog(
+                        active = active, config = p.config,
+                        onDismiss = { removeLora = false },
+                        onSaved = { removeLora = false; adopt(it) },
                     )
                 }
             }
@@ -332,16 +350,26 @@ private fun SensorsStep(sensors: List<SensorInfo>, onAdd: () -> Unit) {
     AddButton("Añadir sensor", onAdd)
 }
 
+/** The module is placed on the board itself: tapping either pin of a serial port
+ *  takes the pair, and "Siguiente" writes it. With no pair chosen the step is skipped. */
 @Composable
-private fun LoraStep(module: Peripheral?, onAdd: () -> Unit, onEdit: () -> Unit, onRemove: () -> Unit) {
+private fun LoraStep(
+    config: ConfigSnapshotMsg,
+    pinmap: PinmapMsg?,
+    selected: Pair<Int, Int>?,
+    onSelect: (Pair<Int, Int>) -> Unit,
+    onRemove: () -> Unit,
+) {
     Body("Un módulo LoRaWAN (Wio-E5) sube las mediciones a la nube y recibe la hora sin cobertura móvil. " +
-        "Añádelo si la estación lleva uno; podrás cambiar sus pines o quitarlo desde Conectividad.")
-    if (module == null) {
-        Hint("Todavía no hay módulos.")
-        AddButton("Añadir módulo LoRa", onAdd)
-    } else {
-        ListItemsCard(items = listOf(module)) { _, m ->
-            PeripheralRow(m, onConsole = {}, onSignalClick = {}, onEdit = onEdit, onRemove = onRemove)
+        "Si la estación lleva uno, toca en el mapa el puerto serie donde está conectado (TX y RX van " +
+        "juntos); si no, pasa al siguiente paso. Podrás cambiar sus pines o quitarlo desde Conectividad.")
+    LoraPinsField(pinmap = pinmap, selected = selected, onSelect = onSelect)
+    if (config.lora) {
+        TextButton(onClick = onRemove) {
+            Icon(TerraIcons.Delete, contentDescription = null, modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.error)
+            Spacer(Modifier.width(8.dp))
+            Text("Quitar módulo LoRa", color = MaterialTheme.colorScheme.error)
         }
     }
 }

@@ -136,7 +136,7 @@ fun PinMapScreen(active: ActiveSession, stationName: String, onBack: () -> Unit)
                     Spacer(Modifier.height(34.dp))
                     PinHeaderList(
                         cells = cells,
-                        selected = selected,
+                        selected = setOfNotNull(selected),
                         onSelect = { c -> selected = if (selected == c.physical) null else c.physical },
                         modifier = Modifier.padding(horizontal = 22.dp),
                         isVisible = { filter == null || it.pinState() == filter },

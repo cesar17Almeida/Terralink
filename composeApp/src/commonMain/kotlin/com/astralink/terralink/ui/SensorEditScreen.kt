@@ -335,8 +335,9 @@ private fun SensorPinScreen(
     }
 }
 
+/** Cancel / save bar of the single-screen editors; Guardar lights only with a change. */
 @Composable
-private fun EditBar(
+internal fun EditBar(
     busy: Boolean,
     canSave: Boolean,
     onCancel: () -> Unit,

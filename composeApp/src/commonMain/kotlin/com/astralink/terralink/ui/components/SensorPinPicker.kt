@@ -4,36 +4,21 @@
 // doing nothing. Two-pin sensors (HC-SR04) fill one slot at a time on ONE board.
 package com.astralink.terralink.ui.components
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.em
-import androidx.compose.ui.unit.sp
 import com.astralink.terralink.ble.protocol.PinmapMsg
 
 /** Which pin of the sensor the taps are filling. Single-pin sensors only use TRIGGER. */
@@ -75,11 +60,18 @@ fun SensorPinPicker(
         }
         ScopeChips(onlyCompatible, eligible, t) { onlyCompatible = it; refused = null }
         Spacer(Modifier.height(12.dp))
-        ChoiceStrip(chosen, refused, t)
+        PickStrip(
+            title = chosen?.label,
+            tag = chosen?.let { "Pin físico ${it.physical.toString().padStart(2, '0')}" },
+            fns = chosen?.fns,
+            refused = refused,
+            placeholder = "TOCA UN PIN RESALTADO",
+            t = t,
+        )
         Spacer(Modifier.height(6.dp))
         PinHeaderList(
             cells = cells,
-            selected = chosen?.physical,
+            selected = setOfNotNull(chosen?.physical),
             mode = PinListMode.PICK,
             isVisible = {
                 !onlyCompatible || it.isEligible(needCaps) || it.physical == chosen?.physical
@@ -126,120 +118,11 @@ private fun SlotChips(
     onPick: (PinSlot) -> Unit,
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-        Chip("Trigger · ${gpio?.let { "GP$it" } ?: "—"}", slot == PinSlot.TRIGGER, t.pick, t) {
+        PickChip("Trigger · ${gpio?.let { "GP$it" } ?: "—"}", slot == PinSlot.TRIGGER, t.pick, t) {
             onPick(PinSlot.TRIGGER)
         }
-        Chip("Echo · ${gpio2?.let { "GP$it" } ?: "—"}", slot == PinSlot.ECHO, t.pick, t) {
+        PickChip("Echo · ${gpio2?.let { "GP$it" } ?: "—"}", slot == PinSlot.ECHO, t.pick, t) {
             onPick(PinSlot.ECHO)
-        }
-    }
-}
-
-@Composable
-private fun ScopeChips(onlyCompatible: Boolean, eligible: Int, t: PinTones, onPick: (Boolean) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-        Chip("Compatibles · $eligible", onlyCompatible, t.accent, t) { onPick(true) }
-        Chip("Todos", !onlyCompatible, t.accent, t) { onPick(false) }
-    }
-}
-
-@Composable
-private fun Chip(label: String, on: Boolean, accent: Color, t: PinTones, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(percent = 50)
-    Box(
-        Modifier
-            .height(31.dp)
-            .background(if (on) accent else Color.Transparent, shape)
-            .border(1.dp, if (on) accent else t.hairline, shape)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            label.uppercase(),
-            style = TextStyle(
-                fontFamily = Mono, fontSize = 8.5.sp, letterSpacing = 0.12.em,
-                color = if (on) MaterialTheme.colorScheme.onPrimary else t.muted,
-            ),
-        )
-    }
-}
-
-/** Same card as the pin map's detail bar, un-elevated: this one lives inside the
- *  wizard's scroll, above the board, because the wizard already owns the footer. */
-@Composable
-private fun ChoiceStrip(chosen: PinCell?, refused: String?, t: PinTones) {
-    val shape = RoundedCornerShape(12.dp)
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceContainerLowest, shape)
-            .border(1.dp, if (refused != null) MaterialTheme.colorScheme.error.copy(alpha = 0.4f)
-                else t.hairline, shape)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        contentAlignment = Alignment.CenterStart,
-    ) {
-        when {
-            refused != null -> Text(
-                refused,
-                style = TextStyle(fontSize = 12.5.sp, lineHeight = 18.sp,
-                    color = MaterialTheme.colorScheme.error),
-            )
-            chosen != null -> Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Row {
-                        Text(
-                            chosen.label,
-                            modifier = Modifier.alignByBaseline(),
-                            style = TextStyle(
-                                fontFamily = Mono, fontSize = 18.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                letterSpacing = (-0.02).em, color = t.pick,
-                            ),
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Text(
-                            "Pin físico ${chosen.physical.toString().padStart(2, '0')}",
-                            modifier = Modifier.alignByBaseline(),
-                            style = TextStyle(
-                                fontFamily = Mono, fontSize = 8.5.sp,
-                                letterSpacing = 0.14.em, color = t.muted.copy(alpha = 0.7f),
-                            ),
-                        )
-                    }
-                    if (chosen.fns.isNotEmpty()) {
-                        Spacer(Modifier.height(7.dp))
-                        Text(
-                            chosen.fns.uppercase(),
-                            style = TextStyle(
-                                fontFamily = Mono, fontSize = 8.5.sp,
-                                letterSpacing = 0.08.em, color = t.faint,
-                            ),
-                        )
-                    }
-                }
-                Box(
-                    Modifier
-                        .height(23.dp)
-                        .background(t.pick.copy(alpha = 0.12f), RoundedCornerShape(percent = 50))
-                        .padding(horizontal = 11.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        "ELEGIDO",
-                        style = TextStyle(
-                            fontFamily = Mono, fontSize = 8.5.sp,
-                            letterSpacing = 0.1.em, color = t.pick,
-                        ),
-                    )
-                }
-            }
-            else -> Text(
-                "TOCA UN PIN RESALTADO",
-                style = TextStyle(
-                    fontFamily = Mono, fontSize = 8.5.sp, letterSpacing = 0.12.em, color = t.faint,
-                ),
-            )
         }
     }
 }
