@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.tooling.preview.Preview
 import com.astralink.terralink.ble.session.ActiveSession
@@ -32,6 +33,7 @@ import com.astralink.terralink.ui.SyncScreen
 import com.astralink.terralink.ui.UpdateFirmwareScreen
 import com.astralink.terralink.ui.theme.TerraTheme
 import com.astralink.terralink.util.nowMs
+import kotlinx.coroutines.launch
 
 private sealed interface Screen {
     data object Splash : Screen
@@ -77,6 +79,15 @@ fun App() {
         // and the readings stream reuse the same connection rather than
         // reconnecting on every navigation.
         var activeSession by remember { mutableStateOf<ActiveSession?>(null) }
+        val appScope = rememberCoroutineScope()
+        // The station accepts ONE connection: close a link that is no longer in use.
+        fun adopt(next: ActiveSession?) {
+            val previous = activeSession
+            if (previous != null && previous !== next) {
+                appScope.launch { runCatching { previous.disconnect() } }
+            }
+            activeSession = next
+        }
 
         when (val current = screen) {
             Screen.Splash -> SplashScreen(
@@ -87,7 +98,7 @@ fun App() {
                 session = session,
                 onAddStation = { screen = Screen.Scan },
                 onOpenStation = { station ->
-                    activeSession = null
+                    adopt(null)
                     screen = Screen.Device(station)
                 },
             )
@@ -102,7 +113,7 @@ fun App() {
                         pairedAtMs = nowMs(),
                     )
                     StationsRepository.add(station)
-                    activeSession = null
+                    adopt(null)
                     screen = Screen.Device(station)
                 },
             )
@@ -110,48 +121,50 @@ fun App() {
             is Screen.Device -> DeviceScreen(
                 station = current.station,
                 session = session,
+                existing = activeSession,
+                onConnected = { adopt(it) },
                 onSyncData = { active ->
-                    activeSession = active
+                    adopt(active)
                     screen = Screen.Sync(current.station)
                 },
                 onViewPredictions = { active ->
-                    activeSession = active
+                    adopt(active)
                     screen = Screen.Predictions(current.station)
                 },
                 onConfigure = { active ->
-                    activeSession = active
+                    adopt(active)
                     screen = Screen.Configuration(current.station)
                 },
                 onOpenConnectivity = { active ->
-                    activeSession = active
+                    adopt(active)
                     screen = Screen.Connectivity(current.station)
                 },
                 onOpenSensors = { active ->
-                    activeSession = active
+                    adopt(active)
                     screen = Screen.Sensors(current.station)
                 },
                 onOpenPinMap = { active ->
-                    activeSession = active
+                    adopt(active)
                     screen = Screen.PinMap(current.station)
                 },
                 onOpenLifecycle = { active ->
-                    activeSession = active
+                    adopt(active)
                     screen = Screen.Lifecycle(current.station)
                 },
                 onOpenAccuracy = { active ->
-                    activeSession = active
+                    adopt(active)
                     screen = Screen.Accuracy(current.station, fromLifecycle = false)
                 },
                 onSetup = { active ->
-                    activeSession = active
+                    adopt(active)
                     screen = Screen.Setup(current.station)
                 },
                 onOpenSoilProbe = { active ->
-                    activeSession = active
+                    adopt(active)
                     screen = Screen.SoilProbe(current.station)
                 },
                 onBack = {
-                    activeSession = null
+                    adopt(null)
                     screen = Screen.StationsList
                 },
             )

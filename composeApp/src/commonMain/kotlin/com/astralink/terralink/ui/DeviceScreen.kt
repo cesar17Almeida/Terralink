@@ -84,6 +84,8 @@ private suspend fun readyFrom(active: ActiveSession, bleId: String): ConnState =
 fun DeviceScreen(
     station: SavedStation,
     session: SaviaSession,
+    existing: ActiveSession?,
+    onConnected: (ActiveSession) -> Unit,
     onSyncData: (ActiveSession) -> Unit,
     onViewPredictions: (ActiveSession) -> Unit,
     onConfigure: (ActiveSession) -> Unit,
@@ -110,13 +112,21 @@ fun DeviceScreen(
         authError = null
         authSubmitting = false // clear stale flag so re-entry into NeedsAuth has an enabled button
         state = try {
-            val active = session.connect(currentStation.bleId)
-            // Tolerate a firmware/cache without the auth characteristic (older GATT
-            // or stale iOS cache): treat as open instead of failing the connection.
-            val auth = runCatching { active.readAuthState() }.getOrNull()
-            // Locked station: prompt for the password before doing anything else.
-            if (auth != null && auth.prov && !auth.authed) ConnState.NeedsAuth(active)
-            else readyFrom(active, station.bleId)
+            // Back from a station sub-screen: keep that link (already authenticated). A
+            // retry, or a link that died meanwhile, reconnects from scratch.
+            val reused = existing?.takeIf { retryKey == 0 }?.let { readyFrom(it, station.bleId) }
+            if (reused is ConnState.Ready) {
+                reused
+            } else {
+                val active = session.connect(currentStation.bleId)
+                onConnected(active)
+                // Tolerate a firmware/cache without the auth characteristic (older GATT
+                // or stale iOS cache): treat as open instead of failing the connection.
+                val auth = runCatching { active.readAuthState() }.getOrNull()
+                // Locked station: prompt for the password before doing anything else.
+                if (auth != null && auth.prov && !auth.authed) ConnState.NeedsAuth(active)
+                else readyFrom(active, station.bleId)
+            }
         } catch (e: BleError) {
             ConnState.Failed(e.message ?: e::class.simpleName ?: "connection failed")
         } catch (e: Throwable) {

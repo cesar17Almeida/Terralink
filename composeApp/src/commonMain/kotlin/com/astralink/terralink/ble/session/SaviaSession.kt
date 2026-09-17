@@ -1,8 +1,13 @@
 package com.astralink.terralink.ble.session
 
 import com.astralink.terralink.ble.BleClient
+import com.astralink.terralink.ble.BleError
 import com.astralink.terralink.ble.ScannedDevice
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withTimeoutOrNull
+
+// iOS never gives up on a connect by itself; a station asleep or out of range must fail visibly.
+private const val CONNECT_TIMEOUT_MS = 30_000L
 
 /**
  * High-level facade over BleClient. The UI layer constructs one of these,
@@ -23,8 +28,14 @@ class SaviaSession(
 
     /** Open a GATT connection. Discovers services + characteristics. */
     suspend fun connect(deviceId: String): ActiveSession {
-        val connection = client.connect(deviceId)
-        return ActiveSession(connection)
+        val connection = withTimeoutOrNull(CONNECT_TIMEOUT_MS) { client.connect(deviceId) }
+            ?: throw BleError.Timeout("the station did not answer the connection")
+        return try {
+            ActiveSession(connection)
+        } catch (e: Throwable) {
+            runCatching { connection.disconnect() }   // never leave a half-open link behind
+            throw e
+        }
     }
 
     /** Release the underlying client (no-op on most platforms). */
