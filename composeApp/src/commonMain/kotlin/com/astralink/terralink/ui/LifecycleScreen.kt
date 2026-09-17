@@ -47,6 +47,7 @@ import com.astralink.terralink.timeline.currentStateLine
 import com.astralink.terralink.timeline.loadLifecycle
 import com.astralink.terralink.timeline.nextWakeAfter
 import com.astralink.terralink.timeline.seriesKeysOf
+import com.astralink.terralink.ui.components.SystemBackHandler
 import com.astralink.terralink.ui.components.timeline.DayFooter
 import com.astralink.terralink.ui.components.timeline.EventDetailBar
 import com.astralink.terralink.ui.components.timeline.LifecycleHeader
@@ -82,6 +83,8 @@ fun LifecycleScreen(
     var reloadKey by remember { mutableStateOf(0) }
     var selectedSeries by remember { mutableStateOf<String?>(null) }
     var selectedEvent by remember { mutableStateOf<StationEvent?>(null) }
+    // The header's arrow only exists once loaded; system back works in every phase.
+    SystemBackHandler(onBack = onBack)
 
     LaunchedEffect(reloadKey) {
         phase = LifePhase.Loading

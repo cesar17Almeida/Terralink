@@ -51,6 +51,7 @@ import com.astralink.terralink.ui.components.PinHeaderList
 import com.astralink.terralink.ui.components.PinLive
 import com.astralink.terralink.ui.components.PinRole
 import com.astralink.terralink.ui.components.PinState
+import com.astralink.terralink.ui.components.SystemBackHandler
 import com.astralink.terralink.ui.components.livePins
 import com.astralink.terralink.ui.components.mergePinmap
 import com.astralink.terralink.ui.components.picoWHeader
@@ -78,6 +79,7 @@ fun PinMapScreen(active: ActiveSession, stationName: String, onBack: () -> Unit)
     var reloadKey by remember { mutableStateOf(0) }
     var filter by remember { mutableStateOf<PinState?>(null) }
     var selected by remember { mutableStateOf<Int?>(null) }   // physical pin
+    SystemBackHandler(onBack = onBack)   // the header draws its own arrow
 
     LaunchedEffect(reloadKey) {
         phase = PinMapPhase.Loading

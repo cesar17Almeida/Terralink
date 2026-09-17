@@ -13,9 +13,11 @@ import androidx.compose.ui.unit.sp
  * Uses a Unicode "‹" glyph instead of material-icons-extended because
  * Compose Multiplatform 1.10 doesn't publish that artifact anymore --
  * the glyph + IconButton's circular ripple gives a clean, minimal look.
+ * The system back action does the same as the arrow, confirmations included.
  */
 @Composable
 fun BackIconButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    SystemBackHandler(onBack = onClick)
     IconButton(onClick = onClick, modifier = modifier) {
         Text(
             text = "‹",

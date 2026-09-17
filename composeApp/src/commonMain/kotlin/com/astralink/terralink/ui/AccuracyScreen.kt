@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.model.SavedStation
+import com.astralink.terralink.ui.components.SystemBackHandler
 import com.astralink.terralink.util.nowMs
 import kotlinx.coroutines.launch
 import terralink.composeapp.generated.resources.Res
@@ -91,6 +92,7 @@ fun AccuracyScreen(
     var replay by remember { mutableStateOf<ReplayWindow?>(null) }
     var replayStage by remember { mutableStateOf<ReplayStage?>(null) }
     var replayReport by remember { mutableStateOf<ReplayReport?>(null) }
+    SystemBackHandler(onBack = onBack)   // the header draws its own arrow
     val scope = rememberCoroutineScope()
 
     // The bundled dataset window. A missing or malformed asset must not take the
