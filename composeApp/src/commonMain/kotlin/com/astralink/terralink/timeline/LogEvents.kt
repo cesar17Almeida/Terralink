@@ -5,24 +5,31 @@ private const val MS_PER_DAY = 86_400_000L
 /**
  * Recover past events from the firmware's log ring (`data_request kind="logs"`).
  *
- * The ring is 24 lines of at most 80 chars, prefixed `HH:MM:SS ` once the wall
- * clock is synced (`src/system/log.c`), and it is the only place the station says
- * out loud that an uplink left, a downlink came back or the LSTM ran -- its status
- * message only carries "the last time" for a couple of those. Parsing it costs
- * nothing on the station and needs no firmware change; the journal then keeps what
- * we read before the ring rotates it away.
+ * The ring holds the station's last few dozen lines of at most 80 chars, prefixed
+ * `HH:MM:SS ` once the wall clock is synced (`src/system/log.c`), and it is the
+ * only place the station says out loud that an uplink left, a downlink came back
+ * or the LSTM ran -- its status message only carries "the last time" for a couple
+ * of those. Parsing it costs nothing on the station and needs no firmware change;
+ * the journal then keeps what we read before the ring rotates it away.
  *
  * Lines with a `+Ns ` prefix (clock not yet synced) are skipped: an event we can't
  * place in time is worse than no event on a timeline.
+ *
+ * One radio cycle prints several lines within the same second -- the frame that
+ * left, the signal it was answered with, what came down -- and the journal keys a
+ * mark by (instant, kind). Rather than let the first line win, the lines of one
+ * instant and kind are merged into a single mark whose detail reads as one line.
  */
-fun parseLogEvents(lines: List<String>, stationNowMs: Long): List<StationEvent> =
-    lines.mapNotNull { line ->
-        val stamped = parseStamp(line, stationNowMs) ?: return@mapNotNull null
-        val (tsMs, body) = stamped
-        classify(body)?.let { (kind, ok, detail) ->
-            StationEvent(tsMs = tsMs, kind = kind, ok = ok, detail = detail)
-        }
+fun parseLogEvents(lines: List<String>, stationNowMs: Long): List<StationEvent> {
+    val marks = lines.flatMap { line ->
+        val (tsMs, body) = parseStamp(line, stationNowMs) ?: return@flatMap emptyList()
+        classify(body).map { tsMs to it }
     }
+    return marks
+        .groupBy { (ts, m) -> ts to m.kind }
+        .map { (key, group) -> merge(key.first, key.second, group.map { it.second }) }
+        .sortedBy { it.tsMs }
+}
 
 /**
  * `HH:MM:SS rest` -> (epoch ms, rest). The stamp carries no date, so it resolves
@@ -41,7 +48,9 @@ private fun parseStamp(line: String, stationNowMs: Long): Pair<Long, String>? {
     val dayStart = stationNowMs - floorMod(stationNowMs, MS_PER_DAY)
     var ts = dayStart + ofDay
     if (ts > stationNowMs) ts -= MS_PER_DAY      // stamped before midnight
-    return ts to line.substring(9)
+    // WARN lines carry a "! " marker after the stamp (for the logs screen); the
+    // words that follow are what classify() knows.
+    return ts to line.substring(9).removePrefix("! ")
 }
 
 private fun floorMod(a: Long, b: Long): Long {
@@ -49,40 +58,147 @@ private fun floorMod(a: Long, b: Long): Long {
     return if (r < 0) r + b else r
 }
 
+/**
+ * What one log line contributes to a mark. A MAIN line describes the event. A
+ * SUFFIX (signal strength) is appended to a description and dropped when there is
+ * none. A FALLBACK only stands when no MAIN line shares the instant.
+ */
+private enum class Role { MAIN, SUFFIX, FALLBACK }
+
+private data class Mark(
+    val kind: EventKind,
+    val ok: Boolean,
+    val detail: String,
+    val role: Role = Role.MAIN,
+)
+
+private fun merge(tsMs: Long, kind: EventKind, marks: List<Mark>): StationEvent {
+    val mains = marks.filter { it.role == Role.MAIN }.map { it.detail }.distinct()
+    val parts = if (mains.isNotEmpty()) {
+        mains + marks.filter { it.role == Role.SUFFIX }.map { it.detail }.distinct()
+    } else {
+        marks.filter { it.role == Role.FALLBACK }.map { it.detail }.distinct()
+            .ifEmpty { marks.map { it.detail }.distinct() }
+    }
+    return StationEvent(tsMs = tsMs, kind = kind, ok = marks.all { it.ok }, detail = parts.joinToString(" · "))
+}
+
+private fun main(kind: EventKind, detail: String) = listOf(Mark(kind, true, detail))
+private fun fail(kind: EventKind, detail: String) = listOf(Mark(kind, false, detail))
+
 /** The INFO/WARN lines worth a mark, in the words the firmware prints them. */
-private fun classify(body: String): Triple<EventKind, Boolean, String>? = when {
+private fun classify(body: String): List<Mark> = when {
+    // --- uplinks -------------------------------------------------------------
     body.startsWith("LoRa: uplink sent") ->
-        Triple(EventKind.LORA_UP, true, "Uplink entregado · sin downlink en la ventana RX")
-    body.startsWith("LoRa: cycle due") ->
-        Triple(EventKind.LORA_UP, true, "Ciclo LoRa · " + body.removePrefix("LoRa: cycle due ").trim('(', ')'))
+        main(EventKind.LORA_UP, "Uplink entregado · sin downlink en la ventana RX")
     body.startsWith("LoRa: uplink timeout") ->
-        Triple(EventKind.LORA_UP, false, "Sin respuesta del módulo al enviar")
+        fail(EventKind.LORA_UP, "Sin respuesta del módulo al enviar")
     body.startsWith("LoRa: uplink rejected") ->
-        Triple(EventKind.LORA_UP, false, "Uplink rechazado · el nodo volverá a unirse")
-    body.startsWith("LoRa: join failed") ->
-        Triple(EventKind.LORA_UP, false, "Join OTAA fallido · reintento en el siguiente periodo")
-    body.startsWith("LoRa: joined network") ->
-        Triple(EventKind.LORA_UP, true, "Unido a la red TTN")
+        fail(EventKind.LORA_UP, "Uplink rechazado · el nodo volverá a unirse")
+    body.startsWith("LoRa: uplink ") ->
+        main(EventKind.LORA_UP, uplinkFrameDetail(body))
+    body.startsWith("LoRa: boot uplink sent") ->
+        listOf(Mark(EventKind.LORA_UP, true, "trama BOOT", Role.SUFFIX))
+    body.startsWith("LoRa: cycle due") ->
+        listOf(Mark(EventKind.LORA_UP, true, "Ciclo LoRa · " + periodWord(body), Role.FALLBACK))
+    body.startsWith("LoRa: module silent") ->
+        fail(EventKind.LORA_UP, "Módulo LoRa sin respuesta · reintento en el siguiente periodo")
+    body.startsWith("LoRa: joining") ->
+        main(EventKind.LORA_UP, "Join OTAA · solicitando unión a la red")
+    body.startsWith("LoRa: join failed") || body.startsWith("LoRa: ping join failed") ->
+        fail(EventKind.LORA_UP, "Join OTAA fallido · reintento en el siguiente periodo")
+    body.startsWith("LoRa: joined network") || body.startsWith("LoRa: ping joined network") ->
+        main(EventKind.LORA_UP, "Unido a la red TTN")
+    // --- downlinks -----------------------------------------------------------
+    body.startsWith("LoRa: signal RSSI") -> signalMarks(body)
     body.startsWith("LoRa downlink: config patch") ->
-        Triple(EventKind.LORA_DOWN, true, "Downlink · parche de configuración")
-    body.startsWith("LoRa downlink:") ->
-        Triple(EventKind.LORA_DOWN, true, "Downlink · " + body.removePrefix("LoRa downlink:").trim())
+        main(EventKind.LORA_DOWN, "Downlink · parche de configuración")
+    body.startsWith("LoRa downlink:") -> downlinkMarks(body)
     body.startsWith("LoRa: bad downlink") ->
-        Triple(EventKind.LORA_DOWN, false, "Downlink ilegible, descartado")
+        fail(EventKind.LORA_DOWN, "Downlink ilegible" + sizeWord(body) + " · descartado")
+    body.startsWith("LoRa: implausible downlink clock") ->
+        fail(EventKind.LORA_DOWN, "Downlink con una hora inverosímil · ignorado")
+    body.startsWith("LoRa config patch:") ->
+        main(EventKind.LORA_DOWN, "Configuración recibida por LoRa · " + appliedWord(body))
+    // --- the model, the clock, the boot -------------------------------------
     body.startsWith("inference: HS30") ->
-        Triple(EventKind.LSTM, true, "Pronóstico HS30 24 h almacenado")
+        main(EventKind.LSTM, "Pronóstico HS30 24 h almacenado")
     body.startsWith("inference: skipped") ->
-        Triple(EventKind.LSTM, false, "Inferencia omitida · " +
+        fail(EventKind.LSTM, "Inferencia omitida · " +
             body.substringAfter("-- ").substringBefore(" (status").ifBlank { "datos insuficientes" })
     body.startsWith("inference: model unavailable") ->
-        Triple(EventKind.LSTM, false, "El modelo no está disponible en esta build")
+        fail(EventKind.LSTM, "El modelo no está disponible en esta build")
     body.startsWith("sched: daily cycle") ->
-        Triple(EventKind.LSTM, true, "Ciclo diario disparado")
+        main(EventKind.LSTM, "Ciclo diario disparado")
     body.startsWith("clock: board was powered off") ->
-        Triple(EventKind.SYNC, true, "Reloj recuperado por LoRa tras un apagón")
+        main(EventKind.SYNC, "Reloj recuperado por LoRa tras un apagón")
     body.startsWith("config: restored from flash") ->
-        Triple(EventKind.BOOT, true, "Arranque · configuración restaurada de flash")
+        main(EventKind.BOOT, "Arranque · configuración restaurada de flash")
     body.startsWith("storage: back-filled") ->
-        Triple(EventKind.SYNC, true, "Lecturas provisionales fechadas al sincronizar")
-    else -> null
+        main(EventKind.SYNC, "Lecturas provisionales fechadas al sincronizar")
+    else -> emptyList()
+}
+
+/** "LoRa: uplink soil 23 B (unconfirmed)" -> what the frame was for. */
+private fun uplinkFrameDetail(body: String): String {
+    val words = body.removePrefix("LoRa: uplink ").split(' ')
+    val frame = words.getOrNull(0) ?: ""
+    val bytes = words.getOrNull(1)?.toIntOrNull()?.let { " · $it B" } ?: ""
+    val what = when (frame) {
+        "boot" -> "Uplink BOOT · pide la hora al backend"
+        "soil" -> "Uplink SOIL · agregados horarios de la sonda"
+        "coords" -> "Uplink COORDS · coordenadas de la estación"
+        "cfg_ack" -> "Uplink CFG_ACK · confirma la configuración recibida"
+        "forecast" ->
+            if (body.contains("(confirmed)")) "Ping · uplink confirmado"
+            else "Uplink FORECAST · mínimo HS30 previsto"
+        else -> "Uplink ${frame.uppercase()}"
+    }
+    return what + bytes
+}
+
+/** "LoRa: cycle due (period=300s)" -> "periodo 300 s". */
+private fun periodWord(body: String): String =
+    Regex("""period=(\d+)s""").find(body)?.let { "periodo ${it.groupValues[1]} s" } ?: "periodo por defecto"
+
+/** "LoRa: signal RSSI -71 dBm, SNR 10.0 dB": the module measured a frame it
+ *  received -- an ACK or a data downlink -- so this is the downlink lane's proof. */
+private fun signalMarks(body: String): List<Mark> {
+    val signal = body.removePrefix("LoRa: signal ").replace(", ", " · ")
+    return listOf(
+        Mark(EventKind.LORA_DOWN, true, "Recepción del gateway · $signal", Role.FALLBACK),
+        Mark(EventKind.LORA_DOWN, true, signal, Role.SUFFIX),
+    )
+}
+
+/** "LoRa downlink: 8 B, 0 past + 0 future TA, clock set" -> the downlink and, when
+ *  it carried the time, the clock sync it caused. Older firmware omits the size. */
+private fun downlinkMarks(body: String): List<Mark> {
+    val rest = body.removePrefix("LoRa downlink:").trim()
+    val ta = Regex("""(\d+) past \+ (\d+) future""").find(rest)
+    val hours = ta?.let { it.groupValues[1].toInt() + it.groupValues[2].toInt() } ?: 0
+    val clock = rest.contains("clock set")
+    val detail = when {
+        clock && hours > 0 -> "Downlink · hora y temperatura del aire ($hours h)"
+        clock -> "Downlink · hora"
+        hours > 0 -> "Downlink · temperatura del aire ($hours h)"
+        ta == null -> "Downlink · $rest"
+        else -> "Downlink · sin hora ni temperatura"
+    }
+    val marks = mutableListOf(Mark(EventKind.LORA_DOWN, true, detail))
+    if (clock) marks += Mark(EventKind.SYNC, true, "Reloj puesto en hora por LoRa")
+    return marks
+}
+
+/** " (10 B)" out of "LoRa: bad downlink (10 B)". */
+private fun sizeWord(body: String): String =
+    Regex("""\((\d+) B\)""").find(body)?.let { " (${it.groupValues[1]} B)" } ?: ""
+
+/** "LoRa config patch: 1 applied, 0 rejected" -> "1 campo aplicado, 0 rechazados". */
+private fun appliedWord(body: String): String {
+    val m = Regex("""(\d+) applied, (\d+) rejected""").find(body)
+        ?: return body.substringAfter(':').trim()
+    val (a, r) = m.destructured
+    return "$a ${if (a == "1") "campo aplicado" else "campos aplicados"}, " +
+        "$r ${if (r == "1") "rechazado" else "rechazados"}"
 }

@@ -56,7 +56,6 @@ import com.astralink.terralink.ui.components.timeline.eyebrow
 import com.astralink.terralink.ui.components.timeline.TimelineTrack
 import com.astralink.terralink.ui.components.timeline.TrackControls
 import com.astralink.terralink.ui.components.timeline.TrackData
-import com.astralink.terralink.ui.components.timeline.TrackMode
 import com.astralink.terralink.ui.components.timeline.TrackSeries
 import com.astralink.terralink.ui.components.timeline.Zoom
 import com.astralink.terralink.ui.components.timeline.dayStats
@@ -83,7 +82,6 @@ fun LifecycleScreen(
     var reloadKey by remember { mutableStateOf(0) }
     var selectedSeries by remember { mutableStateOf<String?>(null) }
     var selectedEvent by remember { mutableStateOf<StationEvent?>(null) }
-    var mode by remember { mutableStateOf(TrackMode.PISTA) }
 
     LaunchedEffect(reloadKey) {
         phase = LifePhase.Loading
@@ -123,8 +121,6 @@ fun LifecycleScreen(
                 is LifePhase.Ready -> LifecycleContent(
                     stationName = station.displayName,
                     load = p.load,
-                    mode = mode,
-                    onMode = { mode = it; selectedEvent = null },
                     selectedSeriesId = selectedSeries,
                     onSelectSeries = { selectedSeries = it },
                     selectedEvent = selectedEvent,
@@ -141,8 +137,6 @@ fun LifecycleScreen(
 private fun LifecycleContent(
     stationName: String,
     load: LifecycleLoad,
-    mode: TrackMode,
-    onMode: (TrackMode) -> Unit,
     selectedSeriesId: String?,
     onSelectSeries: (String) -> Unit,
     selectedEvent: StationEvent?,
@@ -188,9 +182,7 @@ private fun LifecycleContent(
                 TrackControls(
                     unitLabel = series.unit.ifBlank { "sin unidad" },
                     activeZoom = viewport.activeZoom,
-                    mode = mode,
                     onZoom = { viewport.setZoom(it) },
-                    onMode = onMode,
                 )
             }
             Spacer(Modifier.height(12.dp))
@@ -199,7 +191,6 @@ private fun LifecycleContent(
                 data = TrackData(events = events, series = series),
                 viewport = viewport,
                 nowMs = now,
-                mode = mode,
                 selected = selectedEvent,
                 onSelect = onSelectEvent,
             )

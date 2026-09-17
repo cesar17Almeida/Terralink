@@ -45,8 +45,8 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
-/** Fixed track height: the design's 326 px of stacked bands. */
-val TRACK_HEIGHT = 326.dp
+/** Fixed track height: the lane stack plus the ruler (see TrackDraw's bands). */
+val TRACK_HEIGHT = RULER_TOP + 20.dp
 
 /** A mark's hit box, kept from the last draw so a tap can find what it landed on. */
 internal class MarkHit(val rect: Rect, val event: StationEvent)
@@ -56,7 +56,6 @@ fun TimelineTrack(
     data: TrackData,
     viewport: TimelineViewport,
     nowMs: Long,
-    mode: TrackMode,
     selected: StationEvent?,
     onSelect: (StationEvent?) -> Unit,
     modifier: Modifier = Modifier,
@@ -149,10 +148,7 @@ fun TimelineTrack(
         Canvas(modifier = Modifier.fillMaxWidth().height(TRACK_HEIGHT)) {
             hits.clear()
             val ctx = TrackDraw(this, viewport, t, measurer, nowMs, domain, hits, selected)
-            when (mode) {
-                TrackMode.PISTA -> ctx.drawPista(data)
-                TrackMode.CARRILES -> ctx.drawCarriles(data)
-            }
+            ctx.drawCarriles(data)
             ctx.drawRuler()
             ctx.drawNowLine()
         }

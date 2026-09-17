@@ -31,9 +31,7 @@ import androidx.compose.ui.unit.sp
 fun TrackControls(
     unitLabel: String,
     activeZoom: Zoom?,
-    mode: TrackMode,
     onZoom: (Zoom) -> Unit,
-    onMode: (TrackMode) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val t = timeTones()
@@ -42,13 +40,6 @@ fun TrackControls(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(unitLabel.uppercase(), modifier = Modifier.weight(1f), style = eyebrow(t.faint))
-        SmallToggle(
-            options = listOf("Pista" to TrackMode.PISTA, "Carriles" to TrackMode.CARRILES),
-            selected = mode,
-            onSelect = onMode,
-            width = 54.dp,
-        )
-        Spacer(Modifier.width(8.dp))
         SmallToggle(
             options = Zoom.entries.map { it.label to it },
             selected = activeZoom,

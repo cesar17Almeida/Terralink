@@ -1,9 +1,9 @@
-// How one frame of the track is painted: the value curve, the sleep rail, the event
-// marks, the density band, the ruler and the "ahora" line. Split from the gesture
-// side so each file is about one thing -- what the track shows, and how it moves.
+// How one frame of the track is painted: the measured curve, one lane of marks per
+// event kind, the forecast panel, the ruler and the "ahora" line. Split from the
+// gesture side so each file is about one thing -- what the track shows, and how it
+// moves.
 package com.astralink.terralink.ui.components.timeline
 
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
@@ -27,20 +27,12 @@ import com.astralink.terralink.timeline.StationEvent
 import kotlin.math.abs
 import kotlin.math.min
 
-// PISTA bands, in dp from the top of the track.
-private val CURVE_H = 240.dp
-private val RAIL_TOP = 246.dp
-private val RAIL_H = 34.dp
-private val DENSITY_TOP = 286.dp
-private val DENSITY_H = 14.dp
-private val RULER_TOP = 306.dp
-
-// CARRILES bands.
+// The track's bands, in dp from its top: the measured curve, one lane per event
+// kind, the forecast panel, then the ruler. Every kind the journal can hold has a
+// lane here -- a kind without one would simply never be drawn.
 private val LANE_CURVE_H = 118.dp
 private val LANE_TOP = 124.dp
 private val LANE_H = 26.dp     // 11 dp of label, then the mark row under it
-private val FC_TOP = 256.dp
-private val FC_H = 48.dp
 
 private val LANE_ORDER = listOf(
     EventKind.SAMPLE to "Muestra",
@@ -48,8 +40,12 @@ private val LANE_ORDER = listOf(
     EventKind.LORA_DOWN to "LoRa ↓",
     EventKind.LSTM to "LSTM",
     EventKind.SYNC to "Reloj",
+    EventKind.BOOT to "Arranque",
 )
 
+private val FC_TOP = LANE_TOP + LANE_H * LANE_ORDER.size + 2.dp
+private val FC_H = 48.dp
+internal val RULER_TOP = FC_TOP + FC_H + 2.dp
 
 // --- drawing -----------------------------------------------------------------
 
@@ -93,18 +89,7 @@ internal class TrackDraw(
         return top + height - pad - (k * (height - pad * 2)).toFloat()
     }
 
-    // --- PISTA ---------------------------------------------------------------
-
-    fun drawPista(data: TrackData) {
-        val h = dp(CURVE_H)
-        val pad = dp(18.dp)
-        drawSeries(data.series, top = 0f, height = h, pad = pad, withBand = true, withFill = true)
-        drawSleepRail(data, top = dp(RAIL_TOP), height = dp(RAIL_H))
-        drawMarks(data, centerY = dp(RAIL_TOP) + dp(16.dp), boxH = dp(34.dp))
-        drawDensity(data, top = dp(DENSITY_TOP), height = dp(DENSITY_H))
-    }
-
-    // --- CARRILES ------------------------------------------------------------
+    // --- lanes ---------------------------------------------------------------
 
     fun drawCarriles(data: TrackData) {
         val h = dp(LANE_CURVE_H)
@@ -222,63 +207,6 @@ internal class TrackDraw(
             if (i == 0) p.moveTo(px, py) else p.lineTo(px, py)
         }
         return p
-    }
-
-    /**
-     * The sleep rail. What is drawn is the gap between two things that happened --
-     * evidence the station was idle, not a claim it was in deep sleep, which the
-     * app has no way to observe from outside.
-     */
-    private fun drawSleepRail(data: TrackData, top: Float, height: Float) {
-        val barTop = top + dp(11.dp)
-        val barH = dp(11.dp)
-        // A hairline for the axis, and filled bars only where the station was idle:
-        // drawing a full-width track behind them would make "asleep" and "awake" the
-        // same shade of nearly-nothing.
-        scope.drawLine(
-            t.lane, Offset(0f, barTop + barH / 2f), Offset(w, barTop + barH / 2f), strokeWidth = 1f,
-        )
-        val range = vp.visibleRange()
-        val radius = androidx.compose.ui.geometry.CornerRadius(barH / 2f)
-        val inset = dp(1.dp)          // so back-to-back naps read as two, not one band
-        var labelledUntil = -1f       // right edge of the last label drawn
-        for (gap in data.events.sleepGaps()) {
-            if (gap.last < range.first || gap.first > range.last) continue
-            val x0 = x(gap.first) + inset
-            val x1 = x(gap.last) - inset
-            if (x1 - x0 < 3f) continue
-            scope.drawRoundRect(t.rail, Offset(x0, barTop), Size(x1 - x0, barH), radius)
-            // One label per bar, only where the bar is actually wide enough to hold
-            // it and it won't land on the last one drawn: a row of overlapping
-            // "1 h dormida" is noise, not a reading. The width test measures the
-            // text rather than guessing at a dp threshold, so it holds at any zoom.
-            val style = TextStyle(fontFamily = Mono, fontSize = 9.sp, letterSpacing = 0.08.em, color = t.faint)
-            val duration = humanGap(gap.last - gap.first)
-            // Try the full phrase, fall back to the bare duration, drop it if even
-            // that won't fit -- a nap narrower than its own label says nothing.
-            var laid = measurer.measure("$duration dormida", style)
-            if (x1 - x0 < laid.size.width + dp(12.dp)) laid = measurer.measure(duration, style)
-            if (x1 - x0 < laid.size.width + dp(8.dp)) continue
-            val lx = (x0 + (x1 - x0 - laid.size.width) / 2f).coerceIn(0f, w - laid.size.width)
-            if (lx < labelledUntil + dp(8.dp)) continue
-            scope.drawText(laid, topLeft = Offset(lx, top + dp(26.dp)))
-            labelledUntil = lx + laid.size.width
-        }
-    }
-
-    private fun drawMarks(data: TrackData, centerY: Float, boxH: Float) {
-        val range = vp.visibleRange()
-        val showDots = vp.pxPerMs >= DOT_VISIBLE_PX_PER_MS
-        data.events
-            .filter { it.tsMs in range && (showDots || it.kind.isMajor()) }
-            .forEach { mark(it, centerY, boxH) }
-    }
-
-    /** Sample marks past the point where they'd overlap become a density band --
-     *  the design's "resolves into individual points as you zoom in". */
-    private fun drawDensity(data: TrackData, top: Float, height: Float) {
-        if (vp.pxPerMs >= DOT_VISIBLE_PX_PER_MS) return
-        drawDensityInto(data.events.filter { it.kind == EventKind.SAMPLE }, top, height)
     }
 
     private fun drawDensityInto(events: List<StationEvent>, top: Float, height: Float) {

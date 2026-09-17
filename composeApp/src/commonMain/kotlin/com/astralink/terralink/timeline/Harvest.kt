@@ -67,14 +67,16 @@ fun harvestEvents(
         out += StationEvent(it, EventKind.LORA_DOWN, detail = "Downlink · hora y temperatura del aire")
     }
     status.lora?.let { l ->
+        // last_ms is stamped when the module reports an RSSI/SNR, and it only does
+        // that for a frame it RECEIVED (an ACK or a data downlink) in the RX window
+        // after an uplink. One stamp is therefore evidence of both directions --
+        // the uplink got through and something came back down -- so it marks both
+        // lanes, and it stays evidence even if the link has since dropped.
         val last = l.lastMs?.takeIf { it > 0 } ?: return@let
         val signal = l.rssi?.let { r -> "RSSI $r dBm" + (l.snr?.let { s -> " · SNR ${fmt1(s)} dB" } ?: "") }
-        out += StationEvent(
-            tsMs = last,
-            kind = EventKind.LORA_UP,
-            ok = l.joined,
-            detail = signal ?: if (l.joined) "Uplink entregado" else "Enlace sin unir a la red",
-        )
+        out += StationEvent(last, EventKind.LORA_UP, detail = "Uplink entregado · el gateway respondió")
+        out += StationEvent(last, EventKind.LORA_DOWN,
+            detail = "Recepción del gateway" + (signal?.let { " · $it" } ?: ""))
     }
 
     // --- boot ----------------------------------------------------------------
@@ -89,7 +91,14 @@ fun harvestEvents(
     // --- the log ring --------------------------------------------------------
     if (stationNow != null) out += parseLogEvents(logs, stationNow)
 
-    return out.sortedBy { it.tsMs }
+    // The journal keys a mark by (instant, kind, port) and keeps the first insert,
+    // so when the status and the log describe the same moment, hand it the richer
+    // line rather than whichever source happened to come first.
+    return out
+        .groupBy { Triple(it.tsMs, it.kind, it.port) }
+        .values
+        .map { same -> same.maxBy { it.detail.length }.copy(ok = same.all { it.ok }) }
+        .sortedBy { it.tsMs }
 }
 
 private fun kindWord(kind: String): String = when (kind) {

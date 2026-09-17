@@ -1,6 +1,5 @@
 // The timeline's viewport, its gesture handling and its haptics. Kept apart from
-// the drawing so the track can be re-drawn two ways (one continuous pista, or one
-// lane per event kind) over exactly the same scroll, zoom and feel.
+// the drawing so what the track shows and how it moves stay two separate files.
 package com.astralink.terralink.ui.components.timeline
 
 import androidx.compose.runtime.Stable
@@ -21,9 +20,6 @@ enum class Zoom(val label: String, val pxPerMs: Float) {
     DAY("D", 0.26f / 60_000f),
     WEEK("S", 0.04f / 60_000f),
 }
-
-/** How the same schedule is drawn: one continuous track, or one lane per kind. */
-enum class TrackMode { PISTA, CARRILES }
 
 private const val PX_PER_MS_MIN = 0.012f / 60_000f
 private const val PX_PER_MS_MAX = 8f / 60_000f

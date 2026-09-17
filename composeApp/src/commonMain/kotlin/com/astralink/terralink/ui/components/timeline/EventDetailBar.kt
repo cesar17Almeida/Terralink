@@ -164,7 +164,7 @@ private fun Legend() {
         ) {
             LegendItem(GlyphShape.DOT, t.ink, "Muestra")
             LegendItem(GlyphShape.DIAMOND, t.accent, "LoRa ↑ / ↓")
-            LegendItem(GlyphShape.SQUARE, t.ink, "LSTM")
+            LegendItem(GlyphShape.SQUARE, t.ink, "LSTM · Arranque")
             LegendItem(GlyphShape.RING, t.faint, "Reloj")
             LegendItem(GlyphShape.DOT, t.alert, "Fallo")
             LegendItem(GlyphShape.HOLLOW, t.future, "Programado")
