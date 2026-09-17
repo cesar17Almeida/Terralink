@@ -6,8 +6,8 @@ package com.astralink.terralink.timeline
 import com.astralink.terralink.ble.protocol.ConfigSnapshotMsg
 import com.astralink.terralink.ble.protocol.Reading
 import com.astralink.terralink.ble.protocol.StatusMsg
-import com.astralink.terralink.ble.protocol.STATION_RAW_PAGE
 import com.astralink.terralink.ble.session.ActiveSession
+import com.astralink.terralink.ble.session.requestAllRawReadings
 import com.astralink.terralink.state.ArchivedForecast
 import com.astralink.terralink.state.ForecastArchive
 import com.astralink.terralink.state.ReadingsRepository
@@ -68,20 +68,7 @@ private suspend fun fetchAllReadings(
     fromMs: Long,
     toMs: Long,
     maxPages: Int = 8,          // 8 x 150 > the station's 600-row ring
-): List<Reading> {
-    val out = mutableListOf<Reading>()
-    var cursor = fromMs
-    repeat(maxPages) {
-        val page = active.requestRawReadings(fromMs = cursor, toMs = toMs, limit = STATION_RAW_PAGE)
-        if (page.isEmpty()) return out
-        out += page
-        if (page.size < STATION_RAW_PAGE) return out    // range exhausted
-        val next = page.maxOf { it.tsMs } + 1
-        if (next <= cursor) return out                  // no progress: stop rather than spin
-        cursor = next
-    }
-    return out
-}
+): List<Reading> = active.requestAllRawReadings(fromMs, toMs, maxPages)
 
 /** Everything the lifecycle screen needs, already merged. */
 data class LifecycleLoad(

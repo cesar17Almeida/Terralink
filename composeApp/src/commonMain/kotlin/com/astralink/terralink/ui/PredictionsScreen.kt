@@ -60,6 +60,7 @@ import com.astralink.terralink.ble.protocol.Prediction
 import com.astralink.terralink.ble.protocol.Reading
 import com.astralink.terralink.ble.protocol.ReadingKind
 import com.astralink.terralink.ble.session.ActiveSession
+import com.astralink.terralink.ble.session.requestAllRawReadings
 import com.astralink.terralink.model.SavedStation
 import com.astralink.terralink.ui.components.BackIconButton
 import com.astralink.terralink.ui.components.SectionHeader
@@ -126,7 +127,7 @@ fun PredictionsScreen(
         devMode = runCatching { active.readConfig().mockEnabled }.getOrNull() ?: devMode
         val now = nowMs()
         window48 = runCatching {
-            active.requestRawReadings(fromMs = now - WINDOW_HOURS * HOUR_MS, toMs = now)
+            active.requestAllRawReadings(fromMs = now - WINDOW_HOURS * HOUR_MS, toMs = now)
         }.getOrNull()
         weatherUpdatedMs = runCatching { active.readStatus().weatherUpdatedMs }.getOrNull()
         state = try {

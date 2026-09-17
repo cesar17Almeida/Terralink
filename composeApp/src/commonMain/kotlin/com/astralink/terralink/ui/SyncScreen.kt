@@ -79,8 +79,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.astralink.terralink.ble.BleError
 import com.astralink.terralink.ble.protocol.Reading
+import com.astralink.terralink.ble.protocol.STATION_RAW_PAGE
 import com.astralink.terralink.ble.session.ActiveSession
 import com.astralink.terralink.ble.session.DownloadProgress
+import com.astralink.terralink.ble.session.rawPageStep
 import com.astralink.terralink.export.CSV_MIME
 import com.astralink.terralink.export.JSON_MIME
 import com.astralink.terralink.export.exportFileName
@@ -110,7 +112,8 @@ import kotlinx.coroutines.withTimeout
 // Per-page hard cap to keep each notify stream under our per-page timeout.
 // We page automatically until the Pi returns less than this, so the user
 // always gets the full requested range without re-pulsing.
-private const val PAGE_SIZE = 500
+// The station serves at most this many rows per request (see STATION_RAW_PAGE).
+private const val PAGE_SIZE = STATION_RAW_PAGE
 private const val PAGE_TIMEOUT_MS = 30_000L
 // Safety net: stop after this many pages even if the Pi keeps returning
 // full pages. 200 * 500 = 100k readings, ~13 hours of mock data at 12 rows
@@ -695,18 +698,17 @@ private suspend fun runStreamingSync(
                 }
             }
             if (pageReadings.isEmpty()) break
-            all += pageReadings
-            // Move the cursor past the last reading we got so the next page
-            // doesn't re-include it. tsMs ranges are inclusive on `from`.
-            nextFrom = (pageReadings.last().tsMs + 1)
-            if (pageReadings.size < PAGE_SIZE) break  // server drained
+            // Full pages may cut a timestamp in half: its rows come again next page.
+            val step = rawPageStep(pageReadings, nextFrom, PAGE_SIZE)
+            all += step.keep
+            nextFrom = step.next ?: break
         }
 
         onPhase(SyncPhase.Persisting)
         if (all.isNotEmpty()) {
             ReadingsRepository.insertBatch(station.bleId, all)
         }
-        val nextCursor = all.lastOrNull()?.tsMs?.plus(1) ?: toMs
+        val nextCursor = all.maxOfOrNull { it.tsMs }?.plus(1) ?: toMs
         StationsRepository.updateLastSync(station.bleId, nextCursor)
 
         onPhase(SyncPhase.Done(readings = all))
