@@ -246,9 +246,14 @@ class ActiveSession internal constructor(
     suspend fun readAuthState(): AuthStateMsg =
         decode(connection.read(CHR_AUTH_UUID))
 
-    /** Set the password the first time (only works while unprovisioned). */
+    /** Set the password the first time; throws unless the station confirms it (it ignores a second one). */
     suspend fun setPassword(password: String) {
+        if (readAuthState().prov) {
+            throw CodecError("La estación ya tiene contraseña: usa «Cambiar contraseña»")
+        }
         connection.write(CHR_AUTH_UUID, encode(AuthSetMsg(key = passwordKey(password))))
+        val after = readAuthState()
+        if (!after.prov || !after.authed) throw CodecError("La estación no guardó la contraseña")
     }
 
     /** Prove the password for this connection. Returns true if it unlocked the station. */
