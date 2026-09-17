@@ -43,7 +43,7 @@ actual class SaviaConnection internal constructor(
                 delegate.pendingReadUuid = characteristicUuid.lowercase()   // tells reads from notifies
                 peripheral.readValueForCharacteristic(char)
             }
-        } ?: throw BleError.Timeout("read $characteristicUuid: no answer from the station")
+        } ?: throw BleError.Timeout("La estación no respondió (read $characteristicUuid)")
     }
 
     actual suspend fun write(
@@ -64,7 +64,7 @@ actual class SaviaConnection internal constructor(
                 delegate.pendingWrite = cont
                 peripheral.writeValue(value.toNSData(), forCharacteristic = char, type = type)
             }
-        } ?: throw BleError.Timeout("write $characteristicUuid: no answer from the station")
+        } ?: throw BleError.Timeout("La estación no respondió (write $characteristicUuid)")
     }
 
     actual fun notifications(characteristicUuid: String): Flow<ByteArray> {
@@ -82,7 +82,7 @@ actual class SaviaConnection internal constructor(
                 delegate.pendingL2cap = cont
                 peripheral.openL2CAPChannel(psm.toUShort())
             }
-        } ?: throw BleError.Timeout("L2CAP psm=$psm: no answer from the station")
+        } ?: throw BleError.Timeout("La estación no respondió (L2CAP psm=$psm)")
         return L2capChannel(channel)
     }
 
@@ -93,7 +93,7 @@ actual class SaviaConnection internal constructor(
 
     private fun ensureConnected() {
         if (peripheral.state != CBPeripheralStateConnected) {
-            throw BleError.Disconnected("the station is no longer connected")
+            throw BleError.Disconnected("La estación ya no está conectada")
         }
     }
 

@@ -29,7 +29,7 @@ class SaviaSession(
     /** Open a GATT connection. Discovers services + characteristics. */
     suspend fun connect(deviceId: String): ActiveSession {
         val connection = withTimeoutOrNull(CONNECT_TIMEOUT_MS) { client.connect(deviceId) }
-            ?: throw BleError.Timeout("the station did not answer the connection")
+            ?: throw BleError.Timeout("La estación no respondió a la conexión")
         return try {
             ActiveSession(connection)
         } catch (e: Throwable) {

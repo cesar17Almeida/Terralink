@@ -144,7 +144,7 @@ actual class SaviaConnection internal constructor(
                 cont.resumeWithException(BleError.IoError(failure))
             }
         }
-    } ?: throw BleError.Timeout("$what: no answer from the station")
+    } ?: throw BleError.Timeout("La estación no respondió ($what)")
 
     actual suspend fun openL2cap(psm: Int): L2capChannel {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
