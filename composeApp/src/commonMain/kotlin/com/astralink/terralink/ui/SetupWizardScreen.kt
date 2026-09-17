@@ -243,7 +243,8 @@ fun SetupWizardScreen(
                         SetupStep.SENSORS -> SensorsStep(p.config.sensors, onAdd = onAddSensors)
                         SetupStep.LORA -> LoraStep(
                             config = p.config, pinmap = p.pinmap, selected = loraPair,
-                            onSelect = { loraPair = it }, onRemove = { removeLora = true },
+                            onSelect = { loraPair = it }, onClear = { loraPair = currentLora },
+                            onRemove = { removeLora = true },
                         )
                         SetupStep.PASSWORD -> PasswordStep(
                             prov = p.prov, password = password, confirm = confirm,
@@ -358,12 +359,17 @@ private fun LoraStep(
     pinmap: PinmapMsg?,
     selected: Pair<Int, Int>?,
     onSelect: (Pair<Int, Int>) -> Unit,
+    onClear: () -> Unit,
     onRemove: () -> Unit,
 ) {
     Body("Un módulo LoRaWAN (Wio-E5) sube las mediciones a la nube y recibe la hora sin cobertura móvil. " +
         "Si la estación lleva uno, toca en el mapa el puerto serie donde está conectado (TX y RX van " +
         "juntos); si no, pasa al siguiente paso. Podrás cambiar sus pines o quitarlo desde Conectividad.")
     LoraPinsField(pinmap = pinmap, selected = selected, onSelect = onSelect)
+    // A pair tapped by mistake must not switch LoRa on when moving to the next step.
+    if (selected != null && selected != configuredLoraPair(config)) {
+        TextButton(onClick = onClear) { Text("Deshacer selección") }
+    }
     if (config.lora) {
         TextButton(onClick = onRemove) {
             Icon(TerraIcons.Delete, contentDescription = null, modifier = Modifier.size(18.dp),
