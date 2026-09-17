@@ -49,6 +49,33 @@ insertEvent:
 INSERT OR IGNORE INTO StationEvent(station_id, ts_ms, kind, port, ok, detail)
 VALUES (?, ?, ?, ?, ?, ?);
 
+-- The journalled mark of one kind closest to an instant, inside [from_ms, to_ms].
+-- One cycle, sync or boot reaches the app at slightly different instants depending
+-- on which source reported it, so a new mark is matched by window, not by key.
+selectNearestEvent:
+SELECT *
+FROM StationEvent
+WHERE station_id = :station_id
+  AND kind = :kind
+  AND port = :port
+  AND ts_ms BETWEEN :from_ms AND :to_ms
+ORDER BY abs(ts_ms - :center_ms)
+LIMIT 1;
+
+updateEventWords:
+UPDATE StationEvent SET detail = :detail, ok = :ok
+WHERE station_id = :station_id AND ts_ms = :ts_ms AND kind = :kind AND port = :port;
+
+-- Every mark but captures, grouped for compaction.
+selectLandmarkEvents:
+SELECT *
+FROM StationEvent
+WHERE station_id = ? AND kind != 'sample'
+ORDER BY kind, port, ts_ms;
+
+deleteEvent:
+DELETE FROM StationEvent WHERE station_id = ? AND ts_ms = ? AND kind = ? AND port = ?;
+
 selectEventsByRange:
 SELECT *
 FROM StationEvent

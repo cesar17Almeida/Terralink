@@ -3,7 +3,9 @@ package com.astralink.terralink.state
 import com.astralink.terralink.db.TerralinkDb
 import com.astralink.terralink.timeline.EventKind
 import com.astralink.terralink.timeline.StationEvent
+import com.astralink.terralink.timeline.clusterWithin
 import com.astralink.terralink.timeline.eventKindFrom
+import com.astralink.terralink.timeline.sameEventWindowMs
 import com.astralink.terralink.timeline.token
 
 /**
@@ -32,21 +34,56 @@ object TimelineRepository {
         (db ?: error("TimelineRepository not initialized. Call init(createTerralinkDb()) at app launch."))
             .timelineQueries
 
-    /** Append events, ignoring the ones already journalled (same ts + kind + port). */
+    /**
+     * Append events, skipping the ones already journalled: same kind and port
+     * within [sameEventWindowMs]. A later report with longer words replaces the
+     * journalled ones; the instant stays the first one seen.
+     */
     fun record(stationId: String, events: List<StationEvent>) {
         if (events.isEmpty()) return
         val q = queries()
         q.transaction {
             for (e in events) {
-                q.insertEvent(
-                    station_id = stationId,
-                    ts_ms = e.tsMs,
-                    kind = e.kind.token(),
-                    port = e.port.toLong(),
-                    ok = if (e.ok) 1L else 0L,
-                    detail = e.detail,
-                )
+                val kind = e.kind.token()
+                val port = e.port.toLong()
+                val ok = if (e.ok) 1L else 0L
+                val window = e.kind.sameEventWindowMs()
+                val near = q.selectNearestEvent(
+                    station_id = stationId, kind = kind, port = port,
+                    from_ms = e.tsMs - window, to_ms = e.tsMs + window, center_ms = e.tsMs,
+                ).executeAsOneOrNull()
+                if (near == null) {
+                    q.insertEvent(stationId, e.tsMs, kind, port, ok, e.detail)
+                } else if (e.detail.length > near.detail.length) {
+                    q.updateEventWords(
+                        detail = e.detail, ok = minOf(ok, near.ok),
+                        station_id = stationId, ts_ms = near.ts_ms, kind = kind, port = port,
+                    )
+                }
             }
+        }
+    }
+
+    /** Collapse marks that one event left several times in the journal (builds
+     *  before [record] matched by window wrote one per source). */
+    fun compact(stationId: String) {
+        val q = queries()
+        q.transaction {
+            q.selectLandmarkEvents(stationId).executeAsList()
+                .groupBy { it.kind to it.port }
+                .forEach { (key, rows) ->
+                    val window = eventKindFrom(key.first)?.sameEventWindowMs() ?: return@forEach
+                    for (run in clusterWithin(rows, window) { it.ts_ms }) {
+                        if (run.size < 2) continue
+                        val keep = run.first()
+                        run.drop(1).forEach { q.deleteEvent(stationId, it.ts_ms, it.kind, it.port) }
+                        q.updateEventWords(
+                            detail = run.maxBy { it.detail.length }.detail,
+                            ok = run.minOf { it.ok },
+                            station_id = stationId, ts_ms = keep.ts_ms, kind = keep.kind, port = keep.port,
+                        )
+                    }
+                }
         }
     }
 
@@ -72,6 +109,7 @@ object TimelineRepository {
 
     fun prune(stationId: String, nowMs: Long) {
         queries().pruneEventsBefore(stationId, nowMs - RETENTION_MS)
+        compact(stationId)
     }
 
     fun clear(stationId: String) {

@@ -21,7 +21,7 @@ fun harvestEvents(
     logs: List<String>,
     forecastKind: String = "hs30_forecast",
 ): List<StationEvent> {
-    val out = mutableListOf<StationEvent>()
+    val out = mutableListOf<StationEvent>()      // derived from state
     // The station's own clock, or the phone's guess of it. Every stamp below is in
     // the station's frame, so mixing in phone time here would skew the whole track.
     val stationNow = status.nowMs
@@ -89,15 +89,22 @@ fun harvestEvents(
     }
 
     // --- the log ring --------------------------------------------------------
-    if (stationNow != null) out += parseLogEvents(logs, stationNow)
+    val logged = if (stationNow != null) parseLogEvents(logs, stationNow) else emptyList()
 
-    // The journal keys a mark by (instant, kind, port) and keeps the first insert,
-    // so when the status and the log describe the same moment, hand it the richer
-    // line rather than whichever source happened to come first.
-    return out
-        .groupBy { Triple(it.tsMs, it.kind, it.port) }
-        .values
-        .map { same -> same.maxBy { it.detail.length }.copy(ok = same.all { it.ok }) }
+    // The status and the log describe the same moment at different instants (ms at
+    // the start of a radio cycle vs whole seconds later on). One mark per event:
+    // stamped at the earliest report, which the status keeps after the log ring has
+    // rotated, and worded by the log, which says what actually happened.
+    val tagged = out.map { it to false } + logged.map { it to true }
+    return tagged
+        .groupBy { (e, _) -> e.kind to e.port }
+        .flatMap { (key, marks) ->
+            clusterWithin(marks.sortedBy { it.first.tsMs }, key.first.sameEventWindowMs()) { it.first.tsMs }
+                .map { run ->
+                    val words = run.filter { it.second }.ifEmpty { run }.maxBy { it.first.detail.length }.first
+                    words.copy(tsMs = run.first().first.tsMs, ok = run.all { it.first.ok })
+                }
+        }
         .sortedBy { it.tsMs }
 }
 

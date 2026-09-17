@@ -15,10 +15,10 @@ private const val MS_PER_DAY = 86_400_000L
  * Lines with a `+Ns ` prefix (clock not yet synced) are skipped: an event we can't
  * place in time is worse than no event on a timeline.
  *
- * One radio cycle prints several lines within the same second -- the frame that
- * left, the signal it was answered with, what came down -- and the journal keys a
- * mark by (instant, kind). Rather than let the first line win, the lines of one
- * instant and kind are merged into a single mark whose detail reads as one line.
+ * One radio cycle prints several lines over some seconds -- the cycle, the join,
+ * the frame that left, the signal it was answered with, what came down. The lines
+ * of one kind within [sameEventWindowMs] of each other are merged into a single
+ * mark, stamped at the first, whose detail reads as one line.
  */
 fun parseLogEvents(lines: List<String>, stationNowMs: Long): List<StationEvent> {
     val marks = lines.flatMap { line ->
@@ -26,8 +26,11 @@ fun parseLogEvents(lines: List<String>, stationNowMs: Long): List<StationEvent> 
         classify(body).map { tsMs to it }
     }
     return marks
-        .groupBy { (ts, m) -> ts to m.kind }
-        .map { (key, group) -> merge(key.first, key.second, group.map { it.second }) }
+        .groupBy { (_, m) -> m.kind }
+        .flatMap { (kind, group) ->
+            clusterWithin(group.sortedBy { it.first }, kind.sameEventWindowMs()) { it.first }
+                .map { run -> merge(run.first().first, kind, run.map { it.second }) }
+        }
         .sortedBy { it.tsMs }
 }
 
@@ -97,18 +100,16 @@ private fun classify(body: String): List<Mark> = when {
         fail(EventKind.LORA_UP, "Uplink rechazado · el nodo volverá a unirse")
     body.startsWith("LoRa: uplink ") ->
         main(EventKind.LORA_UP, uplinkFrameDetail(body))
-    body.startsWith("LoRa: boot uplink sent") ->
-        listOf(Mark(EventKind.LORA_UP, true, "trama BOOT", Role.SUFFIX))
     body.startsWith("LoRa: cycle due") ->
         listOf(Mark(EventKind.LORA_UP, true, "Ciclo LoRa · " + periodWord(body), Role.FALLBACK))
     body.startsWith("LoRa: module silent") ->
         fail(EventKind.LORA_UP, "Módulo LoRa sin respuesta · reintento en el siguiente periodo")
     body.startsWith("LoRa: joining") ->
-        main(EventKind.LORA_UP, "Join OTAA · solicitando unión a la red")
+        listOf(Mark(EventKind.LORA_UP, true, "Join OTAA · solicitando unión a la red", Role.FALLBACK))
     body.startsWith("LoRa: join failed") || body.startsWith("LoRa: ping join failed") ->
         fail(EventKind.LORA_UP, "Join OTAA fallido · reintento en el siguiente periodo")
     body.startsWith("LoRa: joined network") || body.startsWith("LoRa: ping joined network") ->
-        main(EventKind.LORA_UP, "Unido a la red TTN")
+        listOf(Mark(EventKind.LORA_UP, true, "Unido a la red TTN", Role.SUFFIX))
     // --- downlinks -----------------------------------------------------------
     body.startsWith("LoRa: signal RSSI") -> signalMarks(body)
     body.startsWith("LoRa downlink: config patch") ->
@@ -118,6 +119,8 @@ private fun classify(body: String): List<Mark> = when {
         fail(EventKind.LORA_DOWN, "Downlink ilegible" + sizeWord(body) + " · descartado")
     body.startsWith("LoRa: implausible downlink clock") ->
         fail(EventKind.LORA_DOWN, "Downlink con una hora inverosímil · ignorado")
+    body.startsWith("clock: LoRa time held") ->
+        listOf(Mark(EventKind.LORA_DOWN, true, "hora retenida hasta que otro downlink la confirme", Role.SUFFIX))
     body.startsWith("LoRa config patch:") ->
         main(EventKind.LORA_DOWN, "Configuración recibida por LoRa · " + appliedWord(body))
     // --- the model, the clock, the boot -------------------------------------
@@ -132,6 +135,10 @@ private fun classify(body: String): List<Mark> = when {
         main(EventKind.LSTM, "Ciclo diario disparado")
     body.startsWith("clock: board was powered off") ->
         main(EventKind.SYNC, "Reloj recuperado por LoRa tras un apagón")
+    body.startsWith("clock: two LoRa downlinks agree") ->
+        main(EventKind.SYNC, "Reloj corregido por LoRa · dos downlinks coinciden")
+    body.startsWith("clock: moved back") ->
+        main(EventKind.SYNC, "Reloj retrasado · lecturas fechadas en el futuro corregidas")
     body.startsWith("config: restored from flash") ->
         main(EventKind.BOOT, "Arranque · configuración restaurada de flash")
     body.startsWith("storage: back-filled") ->

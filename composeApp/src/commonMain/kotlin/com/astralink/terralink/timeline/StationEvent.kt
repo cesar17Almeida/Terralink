@@ -36,6 +36,32 @@ data class StationEvent(
     }
 }
 
+/**
+ * How far apart two marks of this kind can be and still be one event. One radio
+ * cycle reaches the app as a status stamp (ms, when it started) and as log lines
+ * (whole seconds, up to ~40 s later); the boot instant is recomputed from a
+ * truncated uptime on every read; the model run is derived to the hour from its
+ * forecast. A capture carries an exact stamp.
+ */
+fun EventKind.sameEventWindowMs(): Long = when (this) {
+    EventKind.SAMPLE -> 0L
+    EventKind.LORA_UP, EventKind.LORA_DOWN, EventKind.SYNC -> 60_000L
+    EventKind.BOOT -> 120_000L
+    EventKind.LSTM -> 3_600_000L
+}
+
+/** Split [items], sorted by [ts], into runs that start within [windowMs] of the
+ *  run's first item. Anchoring on the first bounds how long a run can grow. */
+internal fun <T> clusterWithin(items: List<T>, windowMs: Long, ts: (T) -> Long): List<List<T>> {
+    val runs = mutableListOf<MutableList<T>>()
+    for (item in items) {
+        val run = runs.lastOrNull()
+        if (run != null && ts(item) - ts(run.first()) <= windowMs) run += item
+        else runs += mutableListOf(item)
+    }
+    return runs
+}
+
 /** Wire token for the `kind` column. Kept explicit so renaming the enum can't
  *  silently orphan a journal the user already accumulated. */
 fun EventKind.token(): String = when (this) {

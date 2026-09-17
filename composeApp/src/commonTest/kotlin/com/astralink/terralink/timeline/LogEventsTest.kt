@@ -156,6 +156,78 @@ class LogEventsTest {
         assertEquals("Downlink ilegible (10 B) · descartado", events.first().detail)
     }
 
+    // --- a cycle spans seconds: still one mark per lane ------------------------
+
+    @Test
+    fun aCycleSpreadOverSecondsIsOneMarkPerLane() {
+        // What savia_c prints for a cold-boot cycle that joins and gets the clock back.
+        val events = parseLogEvents(
+            listOf(
+                "10:00:00 LoRa: cycle due (period=3600s)",
+                "10:00:01 LoRa: joining (OTAA)",
+                "10:00:09 LoRa: joined network",
+                "10:00:09 LoRa: uplink boot 6 B (unconfirmed)",
+                "10:00:16 LoRa: signal RSSI -71 dBm, SNR 10.0 dB",
+                "10:00:16 LoRa: boot uplink sent (asks for the clock)",
+                "10:00:17 LoRa downlink: 8 B, 0 past + 0 future TA, clock set",
+            ),
+            NOW,
+        )
+        val up = events.filter { it.kind == EventKind.LORA_UP }
+        assertEquals(1, up.size)
+        assertEquals(NOW - 2 * 3_600_000L, up.first().tsMs)
+        assertEquals("Uplink BOOT · pide la hora al backend · 6 B · Unido a la red TTN", up.first().detail)
+        val down = events.filter { it.kind == EventKind.LORA_DOWN }
+        assertEquals(1, down.size)
+        assertEquals(NOW - 2 * 3_600_000L + 16_000L, down.first().tsMs)
+        assertEquals("Downlink · hora · RSSI -71 dBm · SNR 10.0 dB", down.first().detail)
+        assertEquals(1, events.count { it.kind == EventKind.SYNC })
+    }
+
+    @Test
+    fun cyclesAPeriodApartStaySeparate() {
+        val events = parseLogEvents(
+            listOf(
+                "10:00:00 LoRa: uplink forecast 4 B (unconfirmed)",
+                "10:05:00 LoRa: uplink forecast 4 B (unconfirmed)",
+            ),
+            NOW,
+        )
+        assertEquals(2, events.size)
+    }
+
+    @Test
+    fun aHeldTimeIsNoSync() {
+        // The firmware held a far-behind time for confirmation: a downlink, not a sync.
+        val events = parseLogEvents(
+            listOf(
+                "10:00:16 ! clock: LoRa time held until another agrees (1735689600000)",
+                "10:00:16 LoRa downlink: 8 B, 0 past + 0 future TA",
+            ),
+            NOW,
+        )
+        assertEquals(listOf(EventKind.LORA_DOWN), events.map { it.kind })
+        assertEquals(
+            "Downlink · sin hora ni temperatura · hora retenida hasta que otro downlink la confirme",
+            events.first().detail,
+        )
+    }
+
+    @Test
+    fun aRepairAndItsRewindAreOneSync() {
+        val events = parseLogEvents(
+            listOf(
+                "10:00:16 ! clock: two LoRa downlinks agree -> clock moved back to 1787652016000",
+                "10:00:16 LoRa downlink: 8 B, 0 past + 0 future TA, clock set",
+                "10:00:18 ! clock: moved back 157766400 s; 12 future readings fixed",
+            ),
+            NOW,
+        )
+        val sync = events.filter { it.kind == EventKind.SYNC }
+        assertEquals(1, sync.size)
+        assertTrue(sync.first().detail.startsWith("Reloj corregido por LoRa"))
+    }
+
     @Test
     fun aConfigPatchReportsWhatWasApplied() {
         val events = parseLogEvents(listOf("10:00:08 LoRa config patch: 1 applied, 0 rejected"), NOW)
